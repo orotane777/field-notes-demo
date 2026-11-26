@@ -346,7 +346,7 @@ async function start() {
         mediaTiles(items, loadImage, (m) => removeAttachment(ctx, entry.id, m)),
       );
     };
-    const add = async (files) => {
+    const add = async (files, { showThumbnails = true } = {}) => {
       if (!files.length) return;
       markStarted();
       state.textContent = "자료 저장 중…";
@@ -356,7 +356,7 @@ async function start() {
           remember(ctx.record);
         });
         state.textContent = savedLabel;
-        refreshMedia();
+        if (showThumbnails) refreshMedia();
         scheduleSync();
       } catch (err) {
         state.textContent = "자료 저장 실패";
@@ -386,11 +386,13 @@ async function start() {
       "촬영하기",
       submitAction(async () => {
         pickerActive = true;
+        const openingRevision = ctx.record.revision;
         try {
           await openCamera({
-            onCapture: (f) => add([f]),
+            onCapture: (file) => add([file], { showThumbnails: false }),
             onClose: () => {
               pickerActive = false;
+              if (ctx.record.revision !== openingRevision) refreshMedia();
             },
             onNotice: notice,
           });
@@ -458,7 +460,7 @@ async function start() {
   function trashRecord(ctx) {
     const { d, body } = dialog("기록을 휴지통으로 옮길까요?");
     body.append(
-      el("p", "hint", "갤러리 원본은 보관됩니다."),
+      el("p", "hint", "촬영 원본과 갤러리에서 가져온 파일은 그대로 보관됩니다."),
       button(
         "휴지통으로 이동",
         submitAction(async () => {
@@ -475,7 +477,7 @@ async function start() {
   function removeAttachment(ctx, entryId, m) {
     const { d, body } = dialog(mediaLabel(m) + "을 기록에서 뺄까요?");
     body.append(
-      el("p", "hint", "갤러리 원본은 보관됩니다."),
+      el("p", "hint", "촬영 원본과 갤러리에서 가져온 파일은 그대로 보관됩니다."),
       button(
         "기록에서 빼기",
         submitAction(async () => {
@@ -623,7 +625,7 @@ async function start() {
       el(
         "p",
         "hint",
-        "Pictures 또는 DCIM 안의 폴더를 연결한 뒤 삼성 갤러리에서 원본을 확인하세요.",
+        "별도 설정 없이 촬영 원본이 이 브라우저에 저장됩니다. 갤러리에도 보관하려면 Pictures 또는 DCIM 안의 폴더를 연결하세요.",
       ),
       button(
         "원본 폴더 연결",

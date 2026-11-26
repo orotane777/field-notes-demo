@@ -35,7 +35,7 @@ async function currentFolder() {
 
 export async function prepareGallery() {
   if (typeof window.showDirectoryPicker !== "function") {
-    return "폴더 연결을 지원하지 않습니다. 촬영 후 원본 다운로드를 확인하세요.";
+    return "이 브라우저에서는 원본을 앱에 보관합니다. 원본 보관에서 필요한 파일을 내려받을 수 있습니다.";
   }
   try {
     const directory = await window.showDirectoryPicker({id: "field-originals", mode: "readwrite", startIn: "pictures"});
@@ -70,12 +70,12 @@ async function writeOriginal(file, directory) {
   }
 }
 
-function captureName(blob) {
+function captureName(blob, takenAt) {
   const mime = blob.type.split(";")[0];
   const suffix = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm"}[mime];
   if (!suffix) throw new Error("이 기기의 촬영 형식을 저장할 수 없습니다.");
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-  return new File([blob], `field-${stamp}-${crypto.randomUUID()}.${suffix}`, {type: mime});
+  const stamp = new Date(takenAt).toISOString().replace(/[-:]/g, "");
+  return new File([blob], `field-${stamp}-${crypto.randomUUID()}.${suffix}`, {type: mime, lastModified: takenAt});
 }
 
 const ratios = {"1:1": [1, 1], "3:4": [3, 4], "9:16": [9, 16]};
@@ -103,30 +103,31 @@ function drawFrame(canvas, source, bounds, zoom) {
     crop.w, crop.h, 0, 0, canvas.width, canvas.height);
 }
 
-async function photoBlob(preview, frame, zoom, imageCapture, light, photoLights) {
+async function photoBlob(preview, frame, zoom, imageCapture, light) {
   const streamWidth = preview.videoWidth;
   const streamHeight = preview.videoHeight;
   if (!streamWidth || !streamHeight) throw new Error("카메라 미리보기를 기다려 주세요.");
   let bitmap;
-  if (imageCapture && typeof createImageBitmap === "function") {
-    const fill = light === "torch" ? "off" : light;
+  if (light === "flash" || light === "auto") {
     try {
-      const blob = await imageCapture.takePhoto(photoLights.includes(fill) ? {fillLightMode: fill} : {});
+      const blob = await imageCapture.takePhoto({fillLightMode: light});
       bitmap = await createImageBitmap(blob);
     } catch {
-      if (light === "flash" || light === "auto") throw new Error("플래시 촬영이 실패했습니다. 조명을 끄거나 다시 촬영하세요.");
+      throw new Error("플래시 촬영이 실패했습니다. 조명을 끄거나 다시 촬영하세요.");
     }
   }
+  let canvas;
   try {
     // Still images can include additional sensor area outside the video preview.
     const bounds = bitmap ? centerCrop(bitmap.width, bitmap.height, streamWidth / streamHeight)
       : {x: 0, y: 0, w: streamWidth, h: streamHeight};
-    const canvas = framingCanvas(bounds.w, bounds.h, frame);
+    canvas = framingCanvas(bounds.w, bounds.h, frame);
     drawFrame(canvas, bitmap || preview, bounds, zoom);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .94));
     if (!blob) throw new Error("사진을 만들지 못했습니다. 다시 촬영하세요.");
     return blob;
   } finally {
+    if (canvas) canvas.width = 0;
     bitmap?.close();
   }
 }
@@ -213,7 +214,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           ${cameraIcon("flash")}<span data-light-mark aria-hidden="true"></span>
           <select data-light aria-label="촬영 조명"><option value="off">조명 미지원</option></select>
         </label>
-        <button type="button" class="camera-tool ratio-tool" data-toggle="ratio" aria-controls="camera-ratios" aria-expanded="false" aria-label="촬영 비율 3:4" title="촬영 비율"><span data-ratio-value>3:4</span></button>
+        <button type="button" class="camera-tool ratio-tool" data-toggle="ratio" aria-controls="camera-ratios" aria-expanded="false" aria-label="촬영 비율 1:1" title="촬영 비율"><span data-ratio-value>1:1</span></button>
         <button type="button" class="camera-tool" data-toggle="originals" aria-controls="camera-originals" aria-expanded="false" aria-label="원본 보관" title="원본 보관">
           ${cameraIcon("archive")}<span class="capture-badge" data-pending hidden></span>
         </button>
@@ -267,7 +268,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     next?.focus({preventScroll: true});
   }
   for (const button of toggles) {
-    button.onclick = () => showPane(openPane === button.dataset.toggle ? null : button.dataset.toggle);
+    button.onclick = () => {
+      showPane(openPane === button.dataset.toggle ? null : button.dataset.toggle);
+      if (openPane === "originals") void refreshRecovery().catch(() => status("보관한 원본을 읽지 못했습니다.", true));
+    };
   }
   find("dismiss").onclick = () => showPane(null);
   dialog.addEventListener("pointerdown", event => {
@@ -289,7 +293,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   let recordingTime;
   let recordingFrames;
   let recordingFrame;
-  let ratio = "3:4";
+  let ratio = "1:1";
   let capabilities = {};
   let supportsTorch = false;
   let imageCapture;
@@ -297,12 +301,16 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   let light = "off";
   let hardwareZoom;
   let digitalZoom = 1;
-  let pendingSave = null;
+  const captures = [];
+  let draining = null;
+  let saveError = "";
+  let failedExposures = 0;
   let folder;
   let busy = true;
   let mode = "photo";
   let saved = 0;
   let closed = false;
+  let closing = false;
 
   function currentFrame() {
     if (recordingFrame) return recordingFrame;
@@ -427,63 +435,81 @@ export async function openCamera({onCapture, onClose, onNotice}) {
 
   function update() {
     const recording = recorder?.state === "recording";
-    const available = !closed && !busy && stream?.getVideoTracks()[0]?.readyState === "live";
-    find("shutter").disabled = !available || !!pendingSave;
-    find("photo").disabled = !available || recording || !!pendingSave;
+    const available = !closed && !closing && !busy && stream?.getVideoTracks()[0]?.readyState === "live";
+    find("shutter").disabled = !available || (!!saveError && !recording);
+    find("photo").disabled = !available || recording || !!saveError;
     find("video").disabled = find("photo").disabled || typeof MediaRecorder !== "function" ||
       typeof HTMLCanvasElement.prototype.captureStream !== "function";
     for (const button of ratioButtons) {
       button.disabled = find("photo").disabled;
       button.setAttribute("aria-pressed", String(button.dataset.ratio === ratio));
     }
-    zoomControl.disabled = !available || !!pendingSave;
+    zoomControl.disabled = !available || !!saveError;
     toggleFor("zoom").disabled = zoomControl.disabled;
     for (const preset of find("presets").children) preset.disabled = zoomControl.disabled;
     toggleFor("ratio").disabled = find("photo").disabled;
-    lightControl.disabled = !available || !!pendingSave || lightControl.options.length <= 1;
+    lightControl.disabled = !available || !!saveError || lightControl.options.length <= 1;
     find("photo").setAttribute("aria-pressed", String(mode === "photo"));
     find("video").setAttribute("aria-pressed", String(mode === "video"));
-    find("gallery").disabled = busy || recording;
-    find("done").disabled = busy && !!stream;
+    find("gallery").disabled = closing || busy || recording;
+    find("done").disabled = closing || (busy && !!stream);
     find("shutter").dataset.mode = recording ? "recording" : mode;
     find("shutter").setAttribute("aria-label", recording ? "녹화 정지" : mode === "photo" ? "사진 촬영" : "영상 녹화");
-    find("count").textContent = saved;
-    find("count").hidden = !saved;
-    find("done").setAttribute("title", saved ? `촬영 완료 · ${saved}개 저장` : "촬영 완료");
-    find("done").setAttribute("aria-label", saved ? `촬영 완료 · ${saved}개 저장` : "촬영 완료");
+    const count = saved + captures.length;
+    find("count").textContent = count;
+    find("count").hidden = !count;
+    const doneLabel = count ? `촬영 완료 · ${count}개 촬영` : "촬영 완료";
+    find("done").setAttribute("title", doneLabel);
+    find("done").setAttribute("aria-label", doneLabel);
     find("time").hidden = !recording;
   }
 
   async function refreshRecovery() {
-    const names = await galleryRequest("pending", "readonly", store => store.getAllKeys());
+    let count = 0;
+    let firstName;
+    try {
+      const [total, first] = await Promise.all([
+        galleryRequest("pending", "readonly", store => store.count()),
+        galleryRequest("pending", "readonly", store => store.getAllKeys(null, 1)),
+      ]);
+      count = total;
+      firstName = first[0];
+    } catch (error) {
+      if (!saveError) throw error;
+    }
     if (closed) return;
     const slot = find("recovery");
     slot.replaceChildren();
     const badge = find("pending");
-    badge.hidden = !pendingSave && !names.length;
-    badge.textContent = pendingSave ? "!" : names.length;
-    const notice = pendingSave ? " · 기록 저장 재시도 필요" : names.length ? ` · 원본 ${names.length}개 확인 필요` : "";
+    badge.hidden = !saveError && !(folder && count);
+    badge.textContent = saveError ? "!" : count;
+    const notice = saveError ? " · 저장 재시도 필요" : folder && count ? ` · 원본 ${count}개 폴더 저장 가능` : "";
     toggleFor("originals").setAttribute("aria-label", "원본 보관" + notice);
     toggleFor("originals").title = "원본 보관" + notice;
-    if (pendingSave) {
+    if (saveError) {
       const retry = document.createElement("button");
-      retry.textContent = "기록 저장 재시도";
-      retry.onclick = () => run(() => saveFile(pendingSave));
+      retry.textContent = captures[0]?.recorded ? "원본 보관 재시도" : "기록 저장 재시도";
+      retry.onclick = () => run(async () => {
+        saveError = "";
+        await drainCaptures();
+        await refreshRecovery();
+      });
       slot.append(retry);
     }
-    if (!names.length) return;
+    if (!firstName) return;
     const retry = document.createElement("button");
     const details = document.createElement("p");
-    details.textContent = folder ? `폴더에 옮길 원본 ${names.length}개` : `휴대폰에 원본이 저장됐는지 확인하세요. 대기 ${names.length}개`;
+    details.textContent = folder ? `폴더에 옮길 원본 ${count}개` : `앱에 보관된 원본 ${count}개`;
     slot.append(details);
-    retry.textContent = folder ? `원본 ${names.length}개 폴더 저장 재시도` : "다음 원본 다시 다운로드";
+    retry.textContent = folder ? `원본 ${count}개 폴더에 저장` : "원본 다운로드";
     retry.onclick = () => run(async () => {
       if (!folder) {
-        const file = await galleryRequest("pending", "readonly", store => store.get(names[0]));
+        const file = await galleryRequest("pending", "readonly", store => store.get(firstName));
         if (file) requestDownload(file);
         status("다운로드 후 파일을 확인하고 아래 버튼을 누르세요.");
         return;
       }
+      const names = await galleryRequest("pending", "readonly", store => store.getAllKeys());
       for (const name of names) {
         const file = await galleryRequest("pending", "readonly", store => store.get(name));
         if (!file) continue;
@@ -496,52 +522,106 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     slot.append(retry);
     if (!folder) {
       const confirm = document.createElement("button");
-      confirm.textContent = "이 파일 저장 확인";
-      confirm.title = names[0];
+      confirm.textContent = "다운로드 확인 후 보관함에서 제거";
+      confirm.title = firstName;
       const filename = document.createElement("small");
-      filename.textContent = names[0];
+      filename.textContent = firstName;
       slot.append(filename);
       confirm.onclick = () => run(async () => {
-        if (!window.confirm(`휴대폰에서 다음 원본 파일을 확인했나요?\n${names[0]}`)) return;
-        await galleryRequest("pending", "readwrite", store => store.delete(names[0]));
+        if (!window.confirm(`휴대폰에서 다음 원본 파일을 확인했나요?\n${firstName}`)) return;
+        await galleryRequest("pending", "readwrite", store => store.delete(firstName));
         await refreshRecovery();
       });
       slot.append(confirm);
     }
   }
 
-  async function archive(file) {
+  async function archive(file, directory) {
     let queued = false;
     try {
       await galleryRequest("pending", "readwrite", store => store.put(file, file.name));
       queued = true;
-    } catch { /* The shared folder may still have space when browser storage is full. */ }
-    if (folder) {
+    } catch (error) {
+      if (!directory) throw error;
+    }
+    if (directory) {
       try {
-        await writeOriginal(file, folder);
+        await writeOriginal(file, directory);
         if (queued) await galleryRequest("pending", "readwrite", store => store.delete(file.name));
         return "원본 폴더에 저장했습니다.";
-      } catch {
-        if (queued) return "원본 폴더 저장을 재시도하세요.";
+      } catch (error) {
+        if (!queued) throw error;
+        return "원본은 앱에 보관했습니다. 폴더 저장을 재시도할 수 있습니다.";
       }
     }
-    requestDownload(file);
-    return "원본 다운로드를 요청했습니다. 갤러리에서 확인하세요.";
+    return "원본은 앱에 보관했습니다.";
   }
 
-  async function saveFile(file) {
-    const retrying = pendingSave === file;
-    pendingSave = file;
-    status("기록을 폰에 저장 중입니다.");
-    const [recordResult, originalResult] = await Promise.allSettled([
-      onCapture(file),
-      retrying ? Promise.resolve("") : archive(file)
-    ]);
-    if (recordResult.status === "rejected") throw recordResult.reason;
-    pendingSave = null;
-    saved++;
-    status("기록 저장됨. " + (originalResult.status === "fulfilled" ? originalResult.value : "원본 다운로드를 확인하세요."));
-    await refreshRecovery();
+  function keepOriginal(shot) {
+    // A later shot can finish encoding while an earlier one is still saving.
+    return archive(shot.file, shot.directory).then(message => ({message}), error => ({error}));
+  }
+
+  function enqueueCapture(blob, takenAt) {
+    const shot = {directory: folder, recorded: false};
+    shot.ready = Promise.resolve(blob).then(result => {
+      shot.file = captureName(result, takenAt);
+      shot.backup = keepOriginal(shot);
+    }).catch(error => { shot.error = error; });
+    captures.push(shot);
+    update();
+    void drainCaptures();
+  }
+
+  function drainCaptures() {
+    if (!draining && !saveError && captures.length) {
+      draining = writeCaptures().finally(() => {
+        draining = null;
+        update();
+        if (captures.length && !saveError) return drainCaptures();
+      });
+    }
+    return draining;
+  }
+
+  async function writeCaptures() {
+    let captureError = "";
+    while (captures.length) {
+      const shot = captures[0];
+      await shot.ready;
+      if (shot.error) {
+        failedExposures++;
+        captureError = shot.error.message || "사진을 만들지 못했습니다. 다시 촬영하세요.";
+        status(captureError, true);
+        captures.shift();
+        continue;
+      }
+      try {
+        if (!shot.recorded) {
+          await onCapture(shot.file);
+          shot.recorded = true;
+        }
+        shot.backup ??= keepOriginal(shot);
+        const original = await shot.backup;
+        if (original.error) {
+          shot.backup = null;
+          throw original.error;
+        }
+        captures.shift();
+        saved++;
+        if (!captureError) status("기록 저장됨. " + original.message);
+      } catch {
+        saveError = shot.recorded ? "원본을 별도로 보관하지 못했습니다. 공간을 확인하고 재시도하세요." :
+          "기록 저장에 실패했습니다. 공간을 확인하고 재시도하세요.";
+        status(saveError, true);
+        update();
+        showPane("originals");
+        break;
+      }
+    }
+    if (openPane === "originals" || folder || saveError) {
+      await refreshRecovery().catch(() => status("원본 보관함을 읽지 못했습니다.", true));
+    }
   }
 
   async function run(action) {
@@ -552,9 +632,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       await action();
       return true;
     } catch (error) {
-      status(pendingSave ? "기록 저장에 실패했습니다. 공간을 확인하고 재시도하세요." : (error.message || "작업을 마치지 못했습니다."), !pendingSave);
+      status(error.message || "작업을 마치지 못했습니다.", true);
       await refreshRecovery().catch(() => {});
-      if (pendingSave) showPane("originals");
       return false;
     } finally {
       busy = false;
@@ -627,7 +706,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       recordingFrame = null;
       updateFrame();
     }
-    await saveFile(captureName(blob));
+    enqueueCapture(blob, Date.now());
+    await drainCaptures();
     if (!closed && stream?.getVideoTracks()[0]?.readyState !== "live") await startPreview();
   }
 
@@ -637,9 +717,26 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     releaseRecordingTracks();
   };
   const close = async () => {
-    if (closed || (busy && stream)) return;
-    if (recordingResult && !await run(finishRecording)) return;
-    if (pendingSave && !window.confirm("기록에 저장되지 않은 촬영물이 있습니다. 재시도하지 않고 나갈까요?")) return;
+    if (closed || closing || (busy && stream)) return;
+    const discard = !!saveError;
+    if (discard && !window.confirm("저장을 마치지 못한 촬영물이 있습니다. 재시도하지 않고 나갈까요?")) return;
+    const failuresBeforeClosing = failedExposures;
+    closing = true;
+    update();
+    try {
+      if (recordingResult && !await run(finishRecording)) return;
+      if (discard) {
+        // Already accepted shots may still be encoding or writing their independent originals.
+        await Promise.all(captures.map(async shot => { await shot.ready; await shot.backup; }));
+      } else {
+        if (captures.length) status("촬영한 자료를 저장 중입니다.", true);
+        await drainCaptures();
+        if (saveError || failedExposures !== failuresBeforeClosing) return;
+      }
+    } finally {
+      closing = false;
+      update();
+    }
     closed = true;
     release();
     window.removeEventListener("pagehide", release);
@@ -693,15 +790,25 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       }
     });
   };
-  find("shutter").onclick = () => run(async () => {
-    if (mode === "photo") return saveFile(captureName(await photoBlob(preview, currentFrame(), digitalZoom, imageCapture, light, photoLights)));
-    if (recordingResult) return finishRecording();
-    return startRecording();
-  });
+  function takePhoto() {
+    const takenAt = Date.now();
+    // Without a flash, photoBlob draws this moment's preview before its first await.
+    const exposure = photoBlob(preview, currentFrame(), digitalZoom, imageCapture, light);
+    enqueueCapture(exposure, takenAt);
+    return exposure;
+  }
+  find("shutter").onclick = () => {
+    if (mode === "video") return run(recordingResult ? finishRecording : startRecording);
+    if (light === "flash" || light === "auto") {
+      // The camera can deliver only one hardware flash exposure at a time.
+      return run(() => takePhoto().catch(() => {}));
+    }
+    takePhoto();
+  };
   find("gallery").onclick = () => run(async () => {
     const message = await prepareGallery();
     folder = await currentFolder();
-    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "Pictures 또는 DCIM 안의 폴더를 연결하세요.";
+    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "원본은 이 기기의 앱에 보관합니다.";
     status(message);
     await refreshRecovery();
     if (!folder && !message.includes("취소")) showPane("originals");
@@ -714,7 +821,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   update();
   try {
     folder = await currentFolder();
-    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "원본 자동 보관은 Pictures 또는 DCIM 안의 폴더를 연결하세요.";
+    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "원본은 이 기기의 앱에 보관합니다.";
     await refreshRecovery();
     if (closed) return;
     await startPreview();
