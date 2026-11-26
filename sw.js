@@ -1,6 +1,6 @@
 const base = new URL("./", self.location.href);
 const prefix = "fieldnotes-shell:" + encodeURIComponent(base.pathname) + ":";
-const CACHE = prefix + "5f004179401c035d";
+const CACHE = prefix + "9fab79f6e90145d2";
 const files = [
   "index.html", "app.js", "shared.js", "store.js", "runtime.js", "deployment.js",
   "style.css", "capture.js", "gallery.js", "capture.css", "viewer.html", "viewer.js",

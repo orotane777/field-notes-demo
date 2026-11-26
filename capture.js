@@ -133,18 +133,37 @@ async function photoBlob(preview, frame, zoom, imageCapture, light, photoLights)
 
 function croppedRecording(preview, frame, currentZoom) {
   const canvas = framingCanvas(preview.videoWidth, preview.videoHeight, frame);
-  const stream = canvas.captureStream(30);
+  const manual = typeof window.CanvasCaptureMediaStreamTrack?.prototype.requestFrame === "function";
+  const stream = canvas.captureStream(manual ? 0 : 30);
+  const [track] = stream.getVideoTracks();
   let timer;
   function draw() {
     const bounds = {x: 0, y: 0, w: preview.videoWidth, h: preview.videoHeight};
-    if (bounds.w && bounds.h) drawFrame(canvas, preview, bounds, currentZoom());
+    if (!bounds.w || !bounds.h) return;
+    drawFrame(canvas, preview, bounds, currentZoom());
+    if (manual) track.requestFrame();
   }
   return {
     stream,
-    start() {
-      // Start after MediaRecorder so even a short clip receives its first frame.
-      draw();
+    async start() {
+      // Wait for an actual cropped video frame before the muxer can start with audio alone.
+      const probe = document.createElement("video");
+      probe.muted = true;
+      probe.playsInline = true;
+      probe.srcObject = stream;
       timer = setInterval(draw, 1000 / 30);
+      draw();
+      let timeout;
+      try {
+        await Promise.race([
+          probe.play(),
+          new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("카메라 영상이 준비되지 않았습니다. 다시 녹화하세요.")), 5000); }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+        probe.pause();
+        probe.srcObject = null;
+      }
     },
     stop() {
       clearInterval(timer);
@@ -158,43 +177,72 @@ function timerText(milliseconds) {
   return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
 }
 
+const cameraIcons = {
+  flash: '<path d="m14 2-10 12h7l-1 8 10-13h-7z"/><path class="flash-slash" d="m3 3 18 18"/>',
+  archive: '<path d="M8 5H5l-2 9v5h18v-5l-2-9h-3"/><path d="M3 14h5l1.5 2h5l1.5-2h5M12 2v9m-3-3 3 3 3-3"/>',
+  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/><path d="M3.5 10h17"/>',
+  done: '<path d="m4 12 5.4 5.4L20 6.8"/>',
+  close: '<path d="m6 6 12 12m0-12L6 18"/>',
+};
+function cameraIcon(name) {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${cameraIcons[name]}</svg>`;
+}
+
 export async function openCamera({onCapture, onClose, onNotice}) {
   if (activeCamera) return;
   const dialog = document.createElement("dialog");
   activeCamera = dialog;
   dialog.className = "capture-dialog";
-  dialog.setAttribute("aria-label", "현장 촬영");
+  dialog.setAttribute("aria-label", "카메라");
   dialog.innerHTML = `
     <div class="capture-stage">
-      <div class="capture-frame" data-frame><video data-preview muted autoplay playsinline></video></div>
-      <header><strong>현장 촬영</strong><span data-count>0개 저장</span></header>
-      <output data-time hidden></output>
-      <label class="capture-zoom"><span data-zoom-label>확대</span>
-        <input type="range" data-zoom aria-label="확대 배율" min="1" max="4" step=".1" value="1">
-        <span data-zoom-value>1×</span>
-      </label>
-    </div>
-    <div class="capture-panel">
-      <div class="capture-options">
-        <div class="capture-ratios" role="group" aria-label="촬영 비율">
+      <div class="capture-frame" data-frame>
+        <video data-preview muted autoplay playsinline></video>
+        <div class="capture-zoom-dock">
+          <div class="camera-popup zoom-popup" data-pane="zoom" id="camera-zoom" hidden>
+            <label><span data-zoom-label>확대</span>
+              <input type="range" data-zoom aria-label="확대 배율" min="1" max="4" step=".1" value="1">
+            </label>
+            <div data-presets class="zoom-presets" role="group" aria-label="확대 배율 선택"></div>
+          </div>
+          <button type="button" class="camera-tool zoom-tool" data-toggle="zoom" aria-label="확대 배율 1배" aria-expanded="false" aria-controls="camera-zoom"><span data-zoom-value>1×</span></button>
+        </div>
+      </div>
+      <div class="capture-tools" role="group" aria-label="카메라 도구">
+        <label class="camera-tool light-tool" data-light-icon="off">
+          ${cameraIcon("flash")}<span data-light-mark aria-hidden="true"></span>
+          <select data-light aria-label="촬영 조명"><option value="off">조명 미지원</option></select>
+        </label>
+        <button type="button" class="camera-tool ratio-tool" data-toggle="ratio" aria-controls="camera-ratios" aria-expanded="false" aria-label="촬영 비율 3:4" title="촬영 비율"><span data-ratio-value>3:4</span></button>
+        <button type="button" class="camera-tool" data-toggle="originals" aria-controls="camera-originals" aria-expanded="false" aria-label="원본 보관" title="원본 보관">
+          ${cameraIcon("archive")}<span class="capture-badge" data-pending hidden></span>
+        </button>
+      </div>
+      <div class="camera-popup ratio-popup" role="group" data-pane="ratio" id="camera-ratios" aria-label="촬영 비율 선택" hidden>
           <button type="button" data-ratio="1:1">1:1</button>
           <button type="button" data-ratio="3:4">3:4</button>
           <button type="button" data-ratio="9:16">9:16</button>
-        </div>
-        <select data-light aria-label="촬영 조명"><option value="off">조명 미지원</option></select>
       </div>
+      <section class="camera-popup originals-popup" data-pane="originals" id="camera-originals" aria-labelledby="camera-originals-title" hidden>
+        <div class="originals-head"><h2 id="camera-originals-title">원본 보관</h2>
+          <button type="button" data-dismiss aria-label="원본 보관 닫기">${cameraIcon("close")}</button>
+        </div>
+        <p data-location></p><p data-status></p>
+        <div data-recovery></div>
+      </section>
+      <output data-time hidden aria-live="off"></output>
+      <div class="camera-toast" data-toast role="status">카메라를 여는 중…</div>
+    </div>
+    <div class="capture-panel">
       <div class="capture-modes" aria-label="촬영 모드">
         <button type="button" data-photo aria-pressed="true">사진</button>
         <button type="button" data-video aria-pressed="false">영상</button>
       </div>
       <div class="capture-controls">
-        <button type="button" data-gallery>원본 폴더</button>
-        <button type="button" data-shutter aria-label="사진 촬영"><i></i></button>
-        <button type="button" data-done>촬영 완료</button>
+        <button type="button" class="camera-tool side-tool" data-gallery aria-label="원본 폴더 연결" title="원본 폴더 연결">${cameraIcon("folder")}</button>
+        <button type="button" data-shutter aria-label="사진 촬영"><i aria-hidden="true"></i></button>
+        <button type="button" class="camera-tool side-tool" data-done aria-label="촬영 완료" title="촬영 완료">${cameraIcon("done")}<span class="capture-badge" data-count hidden></span></button>
       </div>
-      <p data-status role="status">카메라를 여는 중입니다.</p>
-      <p data-location></p>
-      <div data-recovery></div>
     </div>`;
   document.body.append(dialog);
   dialog.showModal();
@@ -204,7 +252,37 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   const ratioButtons = Array.from(dialog.querySelectorAll("[data-ratio]"));
   const zoomControl = find("zoom");
   const lightControl = find("light");
-  const status = text => { find("status").textContent = text; };
+  const toggles = Array.from(dialog.querySelectorAll("[data-toggle]"));
+  const panes = Array.from(dialog.querySelectorAll("[data-pane]"));
+  const toggleFor = name => toggles.find(button => button.dataset.toggle === name);
+  let openPane = null;
+  function showPane(name, focus = true) {
+    const previous = openPane;
+    openPane = name;
+    for (const toggle of toggles) toggle.setAttribute("aria-expanded", String(toggle.dataset.toggle === name));
+    for (const pane of panes) pane.hidden = pane.dataset.pane !== name;
+    if (!focus) return;
+    const pane = panes.find(item => item.dataset.pane === name);
+    const next = pane?.querySelector('[aria-pressed="true"], input, [data-dismiss]') || toggleFor(previous);
+    next?.focus({preventScroll: true});
+  }
+  for (const button of toggles) {
+    button.onclick = () => showPane(openPane === button.dataset.toggle ? null : button.dataset.toggle);
+  }
+  find("dismiss").onclick = () => showPane(null);
+  dialog.addEventListener("pointerdown", event => {
+    if (openPane && !event.target.closest("[data-pane], [data-toggle]")) showPane(null, false);
+  });
+  dialog.addEventListener("keydown", event => {
+    if (event.key === "Escape" && openPane) {
+      event.preventDefault();
+      showPane(null);
+    }
+  });
+  function status(text, announce = false) {
+    find("status").textContent = text;
+    find("toast").textContent = announce ? text : "";
+  }
   let stream;
   let microphone;
   let recorder;
@@ -237,8 +315,15 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     find("frame").style.setProperty("--frame-ratio", String(w / h));
     find("frame").style.setProperty("--digital-zoom", digitalZoom);
     const value = Number(zoomControl.value);
-    find("zoom-value").textContent = Number(value.toFixed(2)) + "×";
-    zoomControl.setAttribute("aria-valuetext", Number(value.toFixed(2)) + "배");
+    const display = Number(value.toFixed(2));
+    find("zoom-value").textContent = display + "×";
+    zoomControl.setAttribute("aria-valuetext", display + "배");
+    toggleFor("zoom").setAttribute("aria-label", "확대 배율 " + display + "배");
+    for (const preset of find("presets").children) {
+      preset.setAttribute("aria-pressed", String(Number(preset.value) === display));
+    }
+    find("ratio-value").textContent = ratio;
+    toggleFor("ratio").setAttribute("aria-label", "촬영 비율 " + ratio);
   }
 
   async function setCameraControls(changes) {
@@ -262,6 +347,13 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     if (!choices.some(([value]) => value === light)) light = "off";
     lightControl.replaceChildren(...choices.map(([value, label]) => new Option(label, value)));
     lightControl.value = light;
+    renderLight();
+  }
+
+  function renderLight() {
+    lightControl.parentElement.dataset.lightIcon = light;
+    lightControl.parentElement.title = lightControl.selectedOptions[0]?.textContent || "촬영 조명";
+    find("light-mark").textContent = light === "auto" ? "A" : "";
   }
 
   async function configureCamera(track) {
@@ -275,6 +367,22 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     zoomControl.step = hardwareZoom ? (capabilities.zoom.step || .1) : .1;
     zoomControl.value = hardwareZoom ? settings.zoom : 1;
     find("zoom-label").textContent = hardwareZoom ? "확대" : "디지털 확대";
+    const min = Number(zoomControl.min), max = Number(zoomControl.max);
+    const presets = [min, 1, 2, 3, 10].filter((value, index, all) =>
+      value >= min && value <= max && all.indexOf(value) === index);
+    find("presets").replaceChildren(...presets.map(value => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.value = value;
+      button.textContent = Number(value.toFixed(2)) + "×";
+      button.onclick = () => {
+        zoomControl.value = value;
+        zoomControl.oninput();
+        zoomControl.onchange();
+        showPane(null);
+      };
+      return button;
+    }));
     light = settings.torch ? "torch" : "off";
     imageCapture = undefined;
     photoLights = [];
@@ -312,7 +420,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     const track = live.getVideoTracks()[0];
     track.onended = () => {
       if (recorder?.state === "recording") recorder.stop();
-      else if (!closed) { status("카메라 연결이 끊겼습니다. 촬영 화면을 다시 열어 주세요."); update(); }
+      else if (!closed) { status("카메라 연결이 끊겼습니다. 촬영 화면을 다시 열어 주세요.", true); update(); }
     };
     await configureCamera(track);
   }
@@ -329,6 +437,9 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       button.setAttribute("aria-pressed", String(button.dataset.ratio === ratio));
     }
     zoomControl.disabled = !available || !!pendingSave;
+    toggleFor("zoom").disabled = zoomControl.disabled;
+    for (const preset of find("presets").children) preset.disabled = zoomControl.disabled;
+    toggleFor("ratio").disabled = find("photo").disabled;
     lightControl.disabled = !available || !!pendingSave || lightControl.options.length <= 1;
     find("photo").setAttribute("aria-pressed", String(mode === "photo"));
     find("video").setAttribute("aria-pressed", String(mode === "video"));
@@ -336,7 +447,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     find("done").disabled = busy && !!stream;
     find("shutter").dataset.mode = recording ? "recording" : mode;
     find("shutter").setAttribute("aria-label", recording ? "녹화 정지" : mode === "photo" ? "사진 촬영" : "영상 녹화");
-    find("count").textContent = saved + "개 저장";
+    find("count").textContent = saved;
+    find("count").hidden = !saved;
+    find("done").setAttribute("title", saved ? `촬영 완료 · ${saved}개 저장` : "촬영 완료");
+    find("done").setAttribute("aria-label", saved ? `촬영 완료 · ${saved}개 저장` : "촬영 완료");
     find("time").hidden = !recording;
   }
 
@@ -345,6 +459,12 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     if (closed) return;
     const slot = find("recovery");
     slot.replaceChildren();
+    const badge = find("pending");
+    badge.hidden = !pendingSave && !names.length;
+    badge.textContent = pendingSave ? "!" : names.length;
+    const notice = pendingSave ? " · 기록 저장 재시도 필요" : names.length ? ` · 원본 ${names.length}개 확인 필요` : "";
+    toggleFor("originals").setAttribute("aria-label", "원본 보관" + notice);
+    toggleFor("originals").title = "원본 보관" + notice;
     if (pendingSave) {
       const retry = document.createElement("button");
       retry.textContent = "기록 저장 재시도";
@@ -353,7 +473,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     }
     if (!names.length) return;
     const retry = document.createElement("button");
-    retry.textContent = folder ? `원본 ${names.length}개 폴더 저장 재시도` : `원본 다시 다운로드 (${names.length})`;
+    const details = document.createElement("p");
+    details.textContent = folder ? `폴더에 옮길 원본 ${names.length}개` : `휴대폰에 원본이 저장됐는지 확인하세요. 대기 ${names.length}개`;
+    slot.append(details);
+    retry.textContent = folder ? `원본 ${names.length}개 폴더 저장 재시도` : "다음 원본 다시 다운로드";
     retry.onclick = () => run(async () => {
       if (!folder) {
         const file = await galleryRequest("pending", "readonly", store => store.get(names[0]));
@@ -373,8 +496,11 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     slot.append(retry);
     if (!folder) {
       const confirm = document.createElement("button");
-      confirm.textContent = "첫 번째 대기 파일 저장 확인";
+      confirm.textContent = "이 파일 저장 확인";
       confirm.title = names[0];
+      const filename = document.createElement("small");
+      filename.textContent = names[0];
+      slot.append(filename);
       confirm.onclick = () => run(async () => {
         if (!window.confirm(`휴대폰에서 다음 원본 파일을 확인했나요?\n${names[0]}`)) return;
         await galleryRequest("pending", "readwrite", store => store.delete(names[0]));
@@ -426,8 +552,9 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       await action();
       return true;
     } catch (error) {
-      status(pendingSave ? "기록 저장에 실패했습니다. 공간을 확인하고 재시도하세요." : (error.message || "작업을 마치지 못했습니다."));
+      status(pendingSave ? "기록 저장에 실패했습니다. 공간을 확인하고 재시도하세요." : (error.message || "작업을 마치지 못했습니다."), !pendingSave);
       await refreshRecovery().catch(() => {});
+      if (pendingSave) showPane("originals");
       return false;
     } finally {
       busy = false;
@@ -461,6 +588,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     try {
       recordingFrame = currentFrame();
       recordingFrames = croppedRecording(preview, recordingFrame, () => digitalZoom);
+      await recordingFrames.start();
       const media = new MediaStream([...recordingFrames.stream.getVideoTracks(), ...(microphone?.getAudioTracks() || [])]);
       recorder = new MediaRecorder(media, {...(mimeType ? {mimeType} : {}), videoBitsPerSecond: 2000000});
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
@@ -474,7 +602,6 @@ export async function openCamera({onCapture, onClose, onNotice}) {
         if (!busy && !closed) void run(finishRecording);
       };
       recorder.start(1000);
-      recordingFrames.start();
     } catch (error) {
       releaseRecordingTracks();
       recordingFrame = null;
@@ -486,7 +613,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     const start = Date.now();
     find("time").textContent = "0:00";
     recordingTime = setInterval(() => { find("time").textContent = timerText(Date.now() - start); }, 250);
-    status(microphone ? "녹화 중입니다." : "무음 녹화 중입니다.");
+    status(microphone ? "" : "마이크를 사용할 수 없어 소리 없이 녹화합니다.", !microphone);
   }
 
   async function finishRecording() {
@@ -530,7 +657,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   find("photo").onclick = () => setMode("photo");
   find("video").onclick = () => setMode("video");
   for (const button of ratioButtons) {
-    button.onclick = () => { ratio = button.dataset.ratio; updateFrame(); update(); };
+    button.onclick = () => { ratio = button.dataset.ratio; updateFrame(); update(); showPane(null); };
   }
   zoomControl.oninput = () => {
     if (!hardwareZoom) digitalZoom = Number(zoomControl.value);
@@ -559,6 +686,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           if (typeof settings.torch === "boolean" && settings.torch !== (next === "torch")) throw new Error();
         }
         light = next;
+        renderLight();
       } catch {
         lightControl.value = light;
         throw new Error("이 카메라에서 조명을 변경하지 못했습니다.");
@@ -576,9 +704,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "Pictures 또는 DCIM 안의 폴더를 연결하세요.";
     status(message);
     await refreshRecovery();
+    if (!folder && !message.includes("취소")) showPane("originals");
   });
   find("done").onclick = close;
-  dialog.oncancel = event => { event.preventDefault(); void close(); };
+  dialog.oncancel = event => { event.preventDefault(); if (openPane) showPane(null); else void close(); };
   window.addEventListener("pagehide", release);
   orientation.addEventListener("change", updateFrame);
   updateFrame();
@@ -589,10 +718,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     await refreshRecovery();
     if (closed) return;
     await startPreview();
-    status("촬영할 준비가 되었습니다.");
+    status("");
   } catch (error) {
     const message = ({NotAllowedError: "브라우저에서 카메라 사용을 허용한 후 다시 열어 주세요.", NotFoundError: "사용할 카메라를 찾지 못했습니다.", NotReadableError: "다른 앱의 카메라 사용을 마친 후 다시 열어 주세요."})[error.name] || error.message;
-    status(message);
+    status(message, true);
     onNotice?.(message);
   } finally {
     busy = false;
