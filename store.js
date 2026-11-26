@@ -163,14 +163,18 @@ const fileTypes = {
   webm: "video/webm", mkv: "video/x-matroska",
 };
 
+export function mediaType(file) {
+  const extension = file.name?.split(".").pop().toLowerCase();
+  const declared = file.type?.split(";")[0].trim().toLowerCase();
+  const type = declared && declared !== "application/octet-stream" ? declared : fileTypes[extension];
+  if (!file.size || !type || type === "image/svg+xml" || !/^(image|video)\/[a-z0-9][a-z0-9.+-]*$/.test(type)) return null;
+  return type;
+}
+
 export function addFiles(record, entryId, files, entrySeed) {
   const additions = Array.from(files, (file) => {
-    const extension = file.name?.split(".").pop().toLowerCase();
-    const declared = file.type?.split(";")[0].trim().toLowerCase();
-    const type = declared && declared !== "application/octet-stream" ? declared : fileTypes[extension];
-    if (!file.size || !type || type === "image/svg+xml" || !/^(image|video)\/[a-z0-9][a-z0-9.+-]*$/.test(type)) {
-      throw new Error("내용이 있는 사진이나 영상 파일을 선택해 주세요.");
-    }
+    const type = mediaType(file);
+    if (!type) throw new Error("내용이 있는 사진이나 영상 파일을 선택해 주세요.");
     return { file, type, kind: type.startsWith("video/") ? "video" : "photo" };
   });
   if (!additions.length) return Promise.resolve(record);

@@ -11,6 +11,7 @@ import {
   syncPending,
 } from "./store.js";
 import { openCamera, prepareGallery } from "./capture.js";
+import { chooseAlbum, currentAlbum, forgetAlbum, openRecentAlbum, supportsAlbums } from "./gallery.js";
 import { apiPath, installOfflineShell, staticSample, storageKey, viewerPath } from "./runtime.js";
 import {
   el,
@@ -401,14 +402,27 @@ async function start() {
       "btn primary camera-btn",
     );
     camera.prepend(el("i", "camera-icon"));
-    const gallery = button(
-      "갤러리",
-      () => {
-        pickerActive = true;
-        file.click();
-      },
-      "btn gallery-btn",
-    );
+    function openSystemPicker() {
+      pickerActive = true;
+      try {
+        if (file.showPicker) file.showPicker();
+        else file.click();
+      } catch (error) {
+        pickerActive = false;
+        problem(error);
+      }
+    }
+    const gallery = button("갤러리", () => {
+      if (!supportsAlbums()) return openSystemPicker();
+      pickerActive = true;
+      openRecentAlbum(add, openSystemPicker).then((result) => {
+        if (result !== "system") pickerActive = false;
+      }).catch((error) => {
+        pickerActive = false;
+        problem(error);
+      });
+    }, "btn gallery-btn");
+    gallery.dataset.openGallery = "";
     gallery.prepend(el("i", "gallery-icon"));
     actions.append(camera, gallery);
     panel.append(bar, area, retryBox, mediaBox, actions, file);
@@ -616,6 +630,33 @@ async function start() {
         submitAction(async () => notice(await prepareGallery())),
       ),
     );
+    if (supportsAlbums()) {
+      const albumName = el("p", "hint");
+      const connect = button("카메라 앨범 연결", submitAction(async () => {
+        const folder = await chooseAlbum();
+        if (folder) displayAlbum(folder);
+      }));
+      connect.dataset.linkAlbum = "";
+      const disconnect = button("연결 해제", submitAction(async () => {
+        await forgetAlbum();
+        displayAlbum(null);
+      }), "text-btn");
+      function displayAlbum(folder) {
+        albumName.textContent = folder
+          ? folder.name + " · 읽기 전용"
+          : "DCIM/Camera처럼 사진이 들어 있는 폴더를 연결하세요.";
+        connect.textContent = folder ? "다른 앨범 연결" : "카메라 앨범 연결";
+        disconnect.hidden = !folder;
+      }
+      panel.append(el("h2", "", "갤러리에서 볼 최근 앨범"), albumName, connect, disconnect);
+      displayAlbum(null);
+      try {
+        displayAlbum(await currentAlbum());
+      } catch (error) {
+        problem(error);
+      }
+      if (token !== generation) return;
+    }
     const server = el("section", "panel settings");
     server.append(el("h2", "", staticSample ? "샘플 기록 보관" : "서버 연결"));
     app.append(server);

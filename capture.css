@@ -17,8 +17,17 @@
 }
 .capture-dialog[open] { display: flex; flex-direction: column; }
 .capture-dialog::backdrop { background: rgb(6 13 12 / 83%); }
-.capture-stage { position: relative; flex: 1 1 62%; min-height: 7rem; background: #040808; }
-.capture-stage video { width: 100%; height: 100%; position: absolute; inset: 0; object-fit: contain; }
+.capture-stage { position: relative; flex: 1 1 62%; min-height: 7rem; container-type: size; background: #040808; }
+.capture-frame {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(100cqw, calc(100cqh * var(--frame-ratio)));
+  height: min(100cqh, calc(100cqw / var(--frame-ratio)));
+  overflow: hidden;
+  outline: 1px solid rgb(255 255 255 / 25%);
+}
+.capture-stage video { width: 100%; height: 100%; position: absolute; inset: 0; object-fit: cover; transform: scale(var(--digital-zoom, 1)); }
 .capture-stage header {
   position: absolute;
   inset: 0 0 auto;
@@ -31,7 +40,31 @@
   color: var(--camera-ink);
 }
 .capture-stage header span { font-size: .85rem; }
-.capture-stage output:not([hidden]) { display: block; position: absolute; bottom: 1rem; left: 1rem; background: #8e2423; border-radius: .4rem; padding: .22rem .6rem; color: white; font-variant-numeric: tabular-nums; }
+.capture-stage output:not([hidden]) { display: block; position: absolute; top: 3.5rem; left: 1rem; background: #8e2423; border-radius: .4rem; padding: .22rem .6rem; color: white; font-variant-numeric: tabular-nums; }
+.capture-zoom {
+  position: absolute;
+  bottom: .65rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  max-width: 92%;
+  padding: 0 .85rem;
+  border-radius: 2rem;
+  background: rgb(10 19 17 / 87%);
+  color: var(--camera-ink);
+  font-size: .85rem;
+  white-space: nowrap;
+}
+.capture-zoom input { width: clamp(5rem, 25vw, 9rem); min-height: 2.75rem; margin: 0; padding: 0; accent-color: var(--camera-accent); }
+.capture-zoom [data-zoom-value] { min-width: 2.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+.capture-options { display: flex; justify-content: space-between; align-items: center; gap: .4rem; }
+.capture-ratios { display: flex; gap: .15rem; }
+.capture-ratios button { min-width: 2.75rem; border-color: transparent; padding: .35rem; font-variant-numeric: tabular-nums; }
+.capture-ratios button[aria-pressed="true"] { color: var(--camera-accent); border-color: var(--camera-accent); }
+.capture-options select { max-width: 48%; min-height: 2.75rem; border: 1px solid #738580; border-radius: .65rem; padding: .3rem .4rem; background: var(--camera-surface); color: var(--camera-ink); font: inherit; }
+.capture-options select:disabled { opacity: .65; }
 .capture-panel { flex: 0 0 auto; display: grid; gap: .65rem; padding: .9rem 1.15rem max(1.25rem, env(safe-area-inset-bottom)); }
 .capture-dialog button { font: inherit; padding: .45rem .8rem; min-height: 2.75rem; border: 1px solid #738580; border-radius: .65rem; background: transparent; color: var(--camera-ink); cursor: pointer; }
 .capture-dialog button:disabled { opacity: .45; cursor: default; }

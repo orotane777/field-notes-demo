@@ -3,7 +3,7 @@ import { storageKey } from "./runtime.js";
 let galleryDatabase;
 let activeCamera;
 
-async function galleryRequest(storeName, mode, operation) {
+export async function galleryRequest(storeName, mode, operation) {
   if (!galleryDatabase) {
     galleryDatabase = new Promise((resolve, reject) => {
       const request = indexedDB.open(storageKey("field-camera-originals"), 1);
@@ -78,23 +78,79 @@ function captureName(blob) {
   return new File([blob], `field-${stamp}-${crypto.randomUUID()}.${suffix}`, {type: mime});
 }
 
-async function photoBlob(preview) {
-  const track = preview.srcObject.getVideoTracks()[0];
-  if (typeof ImageCapture === "function") {
+const ratios = {"1:1": [1, 1], "3:4": [3, 4], "9:16": [9, 16]};
+
+function centerCrop(width, height, aspect, zoom = 1) {
+  const w = Math.min(width, height * aspect) / zoom;
+  const h = w / aspect;
+  return {x: (width - w) / 2, y: (height - h) / 2, w, h};
+}
+
+function framingCanvas(width, height, [x, y]) {
+  if (!width || !height) throw new Error("카메라 미리보기를 기다려 주세요.");
+  // Even dimensions are accepted by both the MP4 and WebM encoders.
+  const unit = 2 * Math.floor(Math.min(width / x, height / y) / 2);
+  if (!unit) throw new Error("카메라 영상의 크기가 너무 작습니다.");
+  const canvas = document.createElement("canvas");
+  canvas.width = x * unit;
+  canvas.height = y * unit;
+  return canvas;
+}
+
+function drawFrame(canvas, source, bounds, zoom) {
+  const crop = centerCrop(bounds.w, bounds.h, canvas.width / canvas.height, zoom);
+  canvas.getContext("2d", {alpha: false}).drawImage(source, bounds.x + crop.x, bounds.y + crop.y,
+    crop.w, crop.h, 0, 0, canvas.width, canvas.height);
+}
+
+async function photoBlob(preview, frame, zoom, imageCapture, light, photoLights) {
+  const streamWidth = preview.videoWidth;
+  const streamHeight = preview.videoHeight;
+  if (!streamWidth || !streamHeight) throw new Error("카메라 미리보기를 기다려 주세요.");
+  let bitmap;
+  if (imageCapture && typeof createImageBitmap === "function") {
+    const fill = light === "torch" ? "off" : light;
     try {
-      return await new ImageCapture(track).takePhoto();
+      const blob = await imageCapture.takePhoto(photoLights.includes(fill) ? {fillLightMode: fill} : {});
+      bitmap = await createImageBitmap(blob);
     } catch {
-      // Some cameras expose ImageCapture but have no still-photo mode.
+      if (light === "flash" || light === "auto") throw new Error("플래시 촬영이 실패했습니다. 조명을 끄거나 다시 촬영하세요.");
     }
   }
-  if (!preview.videoWidth || !preview.videoHeight) throw new Error("카메라 미리보기를 기다려 주세요.");
-  const canvas = document.createElement("canvas");
-  canvas.width = preview.videoWidth;
-  canvas.height = preview.videoHeight;
-  canvas.getContext("2d").drawImage(preview, 0, 0);
-  const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .94));
-  if (!blob) throw new Error("사진을 만들지 못했습니다. 다시 촬영하세요.");
-  return blob;
+  try {
+    // Still images can include additional sensor area outside the video preview.
+    const bounds = bitmap ? centerCrop(bitmap.width, bitmap.height, streamWidth / streamHeight)
+      : {x: 0, y: 0, w: streamWidth, h: streamHeight};
+    const canvas = framingCanvas(bounds.w, bounds.h, frame);
+    drawFrame(canvas, bitmap || preview, bounds, zoom);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", .94));
+    if (!blob) throw new Error("사진을 만들지 못했습니다. 다시 촬영하세요.");
+    return blob;
+  } finally {
+    bitmap?.close();
+  }
+}
+
+function croppedRecording(preview, frame, currentZoom) {
+  const canvas = framingCanvas(preview.videoWidth, preview.videoHeight, frame);
+  const stream = canvas.captureStream(30);
+  let timer;
+  function draw() {
+    const bounds = {x: 0, y: 0, w: preview.videoWidth, h: preview.videoHeight};
+    if (bounds.w && bounds.h) drawFrame(canvas, preview, bounds, currentZoom());
+  }
+  return {
+    stream,
+    start() {
+      // Start after MediaRecorder so even a short clip receives its first frame.
+      draw();
+      timer = setInterval(draw, 1000 / 30);
+    },
+    stop() {
+      clearInterval(timer);
+      stream.getTracks().forEach(track => track.stop());
+    }
+  };
 }
 
 function timerText(milliseconds) {
@@ -110,11 +166,23 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   dialog.setAttribute("aria-label", "현장 촬영");
   dialog.innerHTML = `
     <div class="capture-stage">
-      <video data-preview muted autoplay playsinline></video>
+      <div class="capture-frame" data-frame><video data-preview muted autoplay playsinline></video></div>
       <header><strong>현장 촬영</strong><span data-count>0개 저장</span></header>
       <output data-time hidden></output>
+      <label class="capture-zoom"><span data-zoom-label>확대</span>
+        <input type="range" data-zoom aria-label="확대 배율" min="1" max="4" step=".1" value="1">
+        <span data-zoom-value>1×</span>
+      </label>
     </div>
     <div class="capture-panel">
+      <div class="capture-options">
+        <div class="capture-ratios" role="group" aria-label="촬영 비율">
+          <button type="button" data-ratio="1:1">1:1</button>
+          <button type="button" data-ratio="3:4">3:4</button>
+          <button type="button" data-ratio="9:16">9:16</button>
+        </div>
+        <select data-light aria-label="촬영 조명"><option value="off">조명 미지원</option></select>
+      </div>
       <div class="capture-modes" aria-label="촬영 모드">
         <button type="button" data-photo aria-pressed="true">사진</button>
         <button type="button" data-video aria-pressed="false">영상</button>
@@ -132,11 +200,25 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   dialog.showModal();
   const find = name => dialog.querySelector(`[data-${name}]`);
   const preview = find("preview");
+  const orientation = matchMedia("(orientation: landscape)");
+  const ratioButtons = Array.from(dialog.querySelectorAll("[data-ratio]"));
+  const zoomControl = find("zoom");
+  const lightControl = find("light");
   const status = text => { find("status").textContent = text; };
   let stream;
   let microphone;
   let recorder;
   let recordingTime;
+  let recordingFrames;
+  let recordingFrame;
+  let ratio = "3:4";
+  let capabilities = {};
+  let supportsTorch = false;
+  let imageCapture;
+  let photoLights = [];
+  let light = "off";
+  let hardwareZoom;
+  let digitalZoom = 1;
   let pendingSave = null;
   let folder;
   let busy = true;
@@ -144,9 +226,82 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   let saved = 0;
   let closed = false;
 
+  function currentFrame() {
+    if (recordingFrame) return recordingFrame;
+    const [short, long] = ratios[ratio];
+    return orientation.matches ? [long, short] : [short, long];
+  }
+
+  function updateFrame() {
+    const [w, h] = currentFrame();
+    find("frame").style.setProperty("--frame-ratio", String(w / h));
+    find("frame").style.setProperty("--digital-zoom", digitalZoom);
+    const value = Number(zoomControl.value);
+    find("zoom-value").textContent = Number(value.toFixed(2)) + "×";
+    zoomControl.setAttribute("aria-valuetext", Number(value.toFixed(2)) + "배");
+  }
+
+  async function setCameraControls(changes) {
+    const track = stream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    const controls = {...changes};
+    if (capabilities.focusMode?.includes("continuous")) controls.focusMode = "continuous";
+    if (hardwareZoom && controls.zoom === undefined) controls.zoom = settings.zoom;
+    if (supportsTorch && controls.torch === undefined) controls.torch = light === "torch";
+    // Chromium applies image controls separately from stream size and facing mode.
+    await track.applyConstraints({advanced: [controls]});
+    return track.getSettings();
+  }
+
+  function setLightOptions() {
+    const choices = [["off", "조명 끔"]];
+    if (mode === "photo" && photoLights.includes("auto")) choices.push(["auto", "자동 플래시"]);
+    if (mode === "photo" && photoLights.includes("flash")) choices.push(["flash", "촬영 플래시"]);
+    if (supportsTorch) choices.push(["torch", "연속 조명"]);
+    if (choices.length === 1) choices[0][1] = "조명 미지원";
+    if (!choices.some(([value]) => value === light)) light = "off";
+    lightControl.replaceChildren(...choices.map(([value, label]) => new Option(label, value)));
+    lightControl.value = light;
+  }
+
+  async function configureCamera(track) {
+    capabilities = track.getCapabilities?.() || {};
+    supportsTorch = capabilities.torch === true || (Array.isArray(capabilities.torch) && capabilities.torch.includes(true));
+    const settings = track.getSettings();
+    hardwareZoom = capabilities.zoom?.max > capabilities.zoom?.min && Number.isFinite(settings.zoom);
+    digitalZoom = 1;
+    zoomControl.min = hardwareZoom ? capabilities.zoom.min : 1;
+    zoomControl.max = hardwareZoom ? capabilities.zoom.max : 4;
+    zoomControl.step = hardwareZoom ? (capabilities.zoom.step || .1) : .1;
+    zoomControl.value = hardwareZoom ? settings.zoom : 1;
+    find("zoom-label").textContent = hardwareZoom ? "확대" : "디지털 확대";
+    light = settings.torch ? "torch" : "off";
+    imageCapture = undefined;
+    photoLights = [];
+    if (typeof ImageCapture === "function") {
+      try {
+        imageCapture = new ImageCapture(track);
+        photoLights = (await imageCapture.getPhotoCapabilities()).fillLightMode || [];
+      } catch { /* Preview frames also work on cameras without still-photo controls. */ }
+    }
+    if (capabilities.focusMode?.includes("continuous") && settings.focusMode !== "continuous") {
+      await setCameraControls({}).catch(() => {});
+    }
+    setLightOptions();
+    updateFrame();
+  }
+
   async function startPreview() {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("카메라는 HTTPS 또는 localhost에서 열 수 있습니다.");
-    const live = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 1920}, height: {ideal: 1080}}, audio: false});
+    const video = {facingMode: {ideal: "environment"}, width: {ideal: 1920}, height: {ideal: 1080}};
+    const requestZoom = navigator.mediaDevices.getSupportedConstraints().zoom;
+    let live;
+    try {
+      live = await navigator.mediaDevices.getUserMedia({video: requestZoom ? {...video, zoom: true} : video, audio: false});
+    } catch (error) {
+      if (closed || !requestZoom || !["NotAllowedError", "OverconstrainedError", "NotSupportedError"].includes(error.name)) throw error;
+      live = await navigator.mediaDevices.getUserMedia({video, audio: false});
+    }
     if (closed) {
       live.getTracks().forEach(track => track.stop());
       return;
@@ -154,6 +309,12 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     stream = live;
     preview.srcObject = live;
     await preview.play();
+    const track = live.getVideoTracks()[0];
+    track.onended = () => {
+      if (recorder?.state === "recording") recorder.stop();
+      else if (!closed) { status("카메라 연결이 끊겼습니다. 촬영 화면을 다시 열어 주세요."); update(); }
+    };
+    await configureCamera(track);
   }
 
   function update() {
@@ -161,7 +322,14 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     const available = !closed && !busy && stream?.getVideoTracks()[0]?.readyState === "live";
     find("shutter").disabled = !available || !!pendingSave;
     find("photo").disabled = !available || recording || !!pendingSave;
-    find("video").disabled = find("photo").disabled || typeof MediaRecorder !== "function";
+    find("video").disabled = find("photo").disabled || typeof MediaRecorder !== "function" ||
+      typeof HTMLCanvasElement.prototype.captureStream !== "function";
+    for (const button of ratioButtons) {
+      button.disabled = find("photo").disabled;
+      button.setAttribute("aria-pressed", String(button.dataset.ratio === ratio));
+    }
+    zoomControl.disabled = !available || !!pendingSave;
+    lightControl.disabled = !available || !!pendingSave || lightControl.options.length <= 1;
     find("photo").setAttribute("aria-pressed", String(mode === "photo"));
     find("video").setAttribute("aria-pressed", String(mode === "video"));
     find("gallery").disabled = busy || recording;
@@ -264,10 +432,18 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     } finally {
       busy = false;
       update();
+      if (recordingResult && recorder?.state === "inactive" && !closed) void run(finishRecording);
     }
   }
 
   let recordingResult;
+  function releaseRecordingTracks() {
+    recordingFrames?.stop();
+    recordingFrames = undefined;
+    microphone?.getTracks().forEach(track => track.stop());
+    microphone = undefined;
+    clearInterval(recordingTime);
+  }
   async function startRecording() {
     try {
       microphone = await navigator.mediaDevices.getUserMedia({audio: true});
@@ -275,7 +451,6 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       status("마이크를 사용할 수 없어 소리 없이 녹화합니다.");
     }
     if (closed) { microphone?.getTracks().forEach(track => track.stop()); return; }
-    const media = new MediaStream([...stream.getVideoTracks(), ...(microphone?.getAudioTracks() || [])]);
     const mimeType = ["video/mp4", "video/webm;codecs=vp8,opus", "video/webm"].find(type => MediaRecorder.isTypeSupported(type));
     const chunks = [];
     let resolveStop;
@@ -284,23 +459,26 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     // A camera may end its stream before the user taps stop.
     recordingResult.catch(() => {});
     try {
+      recordingFrame = currentFrame();
+      recordingFrames = croppedRecording(preview, recordingFrame, () => digitalZoom);
+      const media = new MediaStream([...recordingFrames.stream.getVideoTracks(), ...(microphone?.getAudioTracks() || [])]);
       recorder = new MediaRecorder(media, {...(mimeType ? {mimeType} : {}), videoBitsPerSecond: 2000000});
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
       let recordingError;
       recorder.onerror = () => { recordingError = new Error("녹화가 중단되었습니다. 새로 녹화하세요."); };
       recorder.onstop = () => {
-        microphone?.getTracks().forEach(track => track.stop());
-        microphone = undefined;
-        clearInterval(recordingTime);
+        releaseRecordingTracks();
         const result = new Blob(chunks, {type: recorder.mimeType || chunks[0]?.type});
         if (recordingError || !result.size) rejectStop(recordingError || new Error("저장할 영상이 없습니다."));
         else resolveStop(result);
         if (!busy && !closed) void run(finishRecording);
       };
       recorder.start(1000);
+      recordingFrames.start();
     } catch (error) {
-      microphone?.getTracks().forEach(track => track.stop());
-      microphone = undefined;
+      releaseRecordingTracks();
+      recordingFrame = null;
+      updateFrame();
       recorder = null;
       recordingResult = null;
       throw error;
@@ -319,6 +497,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     } finally {
       recordingResult = null;
       recorder = null;
+      recordingFrame = null;
+      updateFrame();
     }
     await saveFile(captureName(blob));
     if (!closed && stream?.getVideoTracks()[0]?.readyState !== "live") await startPreview();
@@ -327,8 +507,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   const release = () => {
     if (recorder?.state === "recording") recorder.stop();
     stream?.getTracks().forEach(track => track.stop());
-    microphone?.getTracks().forEach(track => track.stop());
-    clearInterval(recordingTime);
+    releaseRecordingTracks();
   };
   const close = async () => {
     if (closed || (busy && stream)) return;
@@ -337,15 +516,57 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     closed = true;
     release();
     window.removeEventListener("pagehide", release);
+    orientation.removeEventListener("change", updateFrame);
     dialog.close();
     dialog.remove();
     activeCamera = null;
     onClose?.();
   };
-  find("photo").onclick = () => { mode = "photo"; update(); };
-  find("video").onclick = () => { mode = "video"; update(); };
+  function setMode(value) {
+    mode = value;
+    setLightOptions();
+    update();
+  }
+  find("photo").onclick = () => setMode("photo");
+  find("video").onclick = () => setMode("video");
+  for (const button of ratioButtons) {
+    button.onclick = () => { ratio = button.dataset.ratio; updateFrame(); update(); };
+  }
+  zoomControl.oninput = () => {
+    if (!hardwareZoom) digitalZoom = Number(zoomControl.value);
+    updateFrame();
+  };
+  zoomControl.onchange = () => {
+    if (!hardwareZoom) { zoomControl.oninput(); return; }
+    void run(async () => {
+      try {
+        const settings = await setCameraControls({zoom: Number(zoomControl.value)});
+        zoomControl.value = settings.zoom;
+      } catch {
+        zoomControl.value = stream.getVideoTracks()[0].getSettings().zoom;
+        throw new Error("이 카메라에서 배율을 변경하지 못했습니다.");
+      } finally {
+        updateFrame();
+      }
+    });
+  };
+  lightControl.onchange = () => {
+    const next = lightControl.value;
+    void run(async () => {
+      try {
+        if (light === "torch" || next === "torch") {
+          const settings = await setCameraControls({torch: next === "torch"});
+          if (typeof settings.torch === "boolean" && settings.torch !== (next === "torch")) throw new Error();
+        }
+        light = next;
+      } catch {
+        lightControl.value = light;
+        throw new Error("이 카메라에서 조명을 변경하지 못했습니다.");
+      }
+    });
+  };
   find("shutter").onclick = () => run(async () => {
-    if (mode === "photo") return saveFile(captureName(await photoBlob(preview)));
+    if (mode === "photo") return saveFile(captureName(await photoBlob(preview, currentFrame(), digitalZoom, imageCapture, light, photoLights)));
     if (recordingResult) return finishRecording();
     return startRecording();
   });
@@ -359,6 +580,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   find("done").onclick = close;
   dialog.oncancel = event => { event.preventDefault(); void close(); };
   window.addEventListener("pagehide", release);
+  orientation.addEventListener("change", updateFrame);
+  updateFrame();
   update();
   try {
     folder = await currentFolder();
