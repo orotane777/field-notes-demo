@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#153d37" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon-192.png" />
+    <title>현장노트 · 기록</title>
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="stylesheet" href="./capture.css" />
+  </head>
+  <body>
+    <header class="mast">
+      <div class="mast-inner">
+        <span class="brand"
+          ><i class="brand-icon" aria-hidden="true"></i>현장노트</span
+        ><span class="head-date" id="connectionLabel"></span>
+      </div>
+    </header>
+    <div id="banner" class="notice" role="status" hidden></div>
+    <main id="app" class="workspace mobile-work" aria-label="현장 기록"></main>
+    <nav id="mobileNav" class="bottom-nav" aria-label="주 메뉴">
+      <button data-page="write"><i aria-hidden="true">✎</i>기록</button
+      ><button data-page="list"><i aria-hidden="true">▤</i>목록</button
+      ><button data-page="trash"><i aria-hidden="true">▧</i>휴지통</button
+      ><button data-page="settings"><i aria-hidden="true">⚙</i>설정</button>
+    </nav>
+    <noscript>현장 기록을 사용하려면 JavaScript를 켜 주세요.</noscript>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

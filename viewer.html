@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#153d37" />
+    <title>현장노트 · 기록 대시보드</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon-192.png" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="viewer">
+    <header class="mast">
+      <div class="mast-inner">
+        <span class="brand"
+          ><i class="brand-icon" aria-hidden="true"></i>현장노트</span
+        ><span class="mast-divider"></span
+        ><span class="mast-sub">기록 대시보드</span
+        ><span class="mode-chip">조회 전용</span>
+      </div>
+    </header>
+    <main class="desk">
+      <header class="desk-head">
+        <div>
+          <p class="eyebrow" id="dayLabel"></p>
+          <h1>현장 기록</h1>
+        </div>
+        <div class="desk-actions"><div id="picker"></div></div>
+      </header>
+      <div id="connection" class="connection" role="status"></div>
+      <div id="pair"></div>
+      <div class="desk-columns">
+        <section class="panel desktop-list">
+          <div class="section-head">
+            <h2>기록 목록</h2>
+            <span id="count" class="count">0건</span>
+          </div>
+          <div id="rows"></div>
+        </section>
+        <section
+          class="panel desktop-detail"
+          id="detail"
+          aria-label="기록 상세"
+        ></section>
+      </div>
+    </main>
+    <script type="module" src="./viewer.js"></script>
+  </body>
+</html>
