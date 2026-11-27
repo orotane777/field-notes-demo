@@ -29,19 +29,36 @@ export async function galleryRequest(storeName, mode, operation) {
   });
 }
 
-async function currentFolder() {
-  const directory = await galleryRequest("settings", "readonly", store => store.get("directory"));
-  if (directory && await directory.queryPermission({mode: "readwrite"}) === "granted") return directory;
-  return null;
+const folderAccess = {mode: "readwrite"};
+
+async function chooseOriginalFolder() {
+  const directory = await window.showDirectoryPicker({id: "field-originals", ...folderAccess, startIn: "pictures"});
+  await galleryRequest("settings", "readwrite", store => {
+    store.put(directory, "directory");
+    return store.put("folder", "phoneCopyMode");
+  });
+  return directory;
+}
+
+async function readPhoneCopySettings() {
+  const [preference, directory] = await Promise.all(["phoneCopyMode", "directory"].map(key =>
+    galleryRequest("settings", "readonly", store => store.get(key))));
+  // A folder selected in previous releases was already an explicit choice to save there.
+  const mode = preference ?? (directory ? "folder" : "off");
+  return {mode, directory, writable: mode === "folder" ? await writableFolder(directory) : null};
+}
+
+async function writableFolder(directory) {
+  try { return await directory?.queryPermission(folderAccess) === "granted" ? directory : null; }
+  catch { return null; }
 }
 
 export async function prepareGallery() {
   if (typeof window.showDirectoryPicker !== "function") {
-    return "이 브라우저에서는 원본을 앱에 보관합니다. 원본 보관에서 필요한 파일을 내려받을 수 있습니다.";
+    return "폴더 선택을 지원하지 않습니다. 카메라 설정에서 다운로드로 추가 저장할 수 있습니다.";
   }
   try {
-    const directory = await window.showDirectoryPicker({id: "field-originals", mode: "readwrite", startIn: "pictures"});
-    await galleryRequest("settings", "readwrite", store => store.put(directory, "directory"));
+    const directory = await chooseOriginalFolder();
     return `원본 폴더 ‘${directory.name}’ 연결됨`;
   } catch (error) {
     if (error.name === "AbortError") return "폴더 선택을 취소했습니다.";
@@ -248,8 +265,7 @@ async function prepareVp8Encoder(stream) {
 
 const cameraIcons = {
   flash: '<path d="m14 2-10 12h7l-1 8 10-13h-7z"/><path class="flash-slash" d="m3 3 18 18"/>',
-  archive: '<path d="M8 5H5l-2 9v5h18v-5l-2-9h-3"/><path d="M3 14h5l1.5 2h5l1.5-2h5M12 2v9m-3-3 3 3 3-3"/>',
-  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/><path d="M3.5 10h17"/>',
+  settings: '<path d="m10.2 2-.6 2.3-1.6.9-2.3-.6-1.8 3 1.7 1.7v2l-1.7 1.7 1.8 3 2.3-.6 1.6.9.6 2.3h3.6l.6-2.3 1.6-.9 2.3.6 1.8-3-1.7-1.7v-2l1.7-1.7-1.8-3-2.3.6-1.6-.9-.6-2.3z" transform="translate(0 1.5)"/><circle cx="12" cy="12" r="3"/>',
   done: '<path d="m4 12 5.4 5.4L20 6.8"/>',
   close: '<path d="m6 6 12 12m0-12L6 18"/>',
 };
@@ -283,8 +299,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           <select data-light aria-label="촬영 조명"><option value="off">조명 미지원</option></select>
         </label>
         <button type="button" class="camera-tool ratio-tool" data-toggle="ratio" aria-controls="camera-ratios" aria-expanded="false" aria-label="촬영 비율 1:1" title="촬영 비율"><span data-ratio-value>1:1</span></button>
-        <button type="button" class="camera-tool" data-toggle="originals" aria-controls="camera-originals" aria-expanded="false" aria-label="원본 보관" title="원본 보관">
-          ${cameraIcon("archive")}<span class="capture-badge" data-pending hidden></span>
+        <button type="button" class="camera-tool" data-toggle="originals" data-camera-settings aria-controls="camera-originals" aria-expanded="false" aria-label="카메라 설정" title="카메라 설정">
+          ${cameraIcon("settings")}<span class="capture-badge" data-pending hidden></span>
         </button>
       </div>
       <div class="camera-popup ratio-popup" role="group" data-pane="ratio" id="camera-ratios" aria-label="촬영 비율 선택" hidden>
@@ -292,12 +308,21 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           <button type="button" data-ratio="3:4">3:4</button>
           <button type="button" data-ratio="9:16">9:16</button>
       </div>
-      <section class="camera-popup originals-popup" data-pane="originals" id="camera-originals" aria-labelledby="camera-originals-title" hidden>
-        <div class="originals-head"><h2 id="camera-originals-title">원본 보관</h2>
-          <button type="button" data-dismiss aria-label="원본 보관 닫기">${cameraIcon("close")}</button>
+      <section class="camera-popup originals-popup" data-pane="originals" data-phone-mode="off" id="camera-originals" aria-labelledby="camera-originals-title" hidden>
+        <div class="originals-head"><h2 id="camera-originals-title">카메라 설정</h2>
+          <button type="button" data-dismiss aria-label="카메라 설정 닫기">${cameraIcon("close")}</button>
         </div>
-        <p data-location></p>
-        <button type="button" class="originals-folder" data-gallery>${cameraIcon("folder")}<span>원본 폴더 연결</span></button>
+        <h3 id="camera-phone-save-title">내 폰에도 함께 저장</h3>
+        <div class="phone-save-options" role="group" aria-labelledby="camera-phone-save-title">
+          <button type="button" data-phone-off aria-pressed="true">앱에만 저장</button>
+          <button type="button" data-gallery aria-pressed="false">폴더에도 저장</button>
+          <button type="button" data-phone-download aria-pressed="false">다운로드로 추가 저장</button>
+        </div>
+        <p data-location role="status"></p>
+        <button type="button" data-phone-reconnect hidden>폴더 권한 다시 허용</button>
+        <p class="download-hint">갤러리용 폴더는 Pictures 또는 DCIM 안에서 선택하세요. 다운로드는 알림이 뜨거나 여러 파일의 저장 허용을 물을 수 있습니다.</p>
+        <p data-phone-notice role="status" hidden></p>
+        <h3>앱에 보관한 원본</h3>
         <p data-status></p>
         <div data-recovery></div>
       </section>
@@ -378,7 +403,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   let draining = null;
   let saveError = "";
   let failedExposures = 0;
+  let copyMode = "off";
+  let storedFolder;
   let folder;
+  let phoneCopyIssue = "";
   let busy = true;
   let mode = "photo";
   let saved = 0;
@@ -524,7 +552,9 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     lightControl.disabled = !available || !!saveError || lightControl.options.length <= 1;
     find("photo").setAttribute("aria-pressed", String(mode === "photo"));
     find("video").setAttribute("aria-pressed", String(mode === "video"));
-    find("gallery").disabled = closing || busy || recording;
+    const changingDestination = closing || busy || recording;
+    find("gallery").disabled = changingDestination || typeof window.showDirectoryPicker !== "function";
+    find("phone-off").disabled = find("phone-download").disabled = find("phone-reconnect").disabled = changingDestination;
     review.setAvailable(!closing && !closed && !recording && (!busy || savingFinishedVideo));
     find("done").disabled = closing || (busy && !!stream);
     find("shutter").dataset.mode = recording ? "recording" : mode;
@@ -554,12 +584,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     if (closed) return;
     const slot = find("recovery");
     slot.replaceChildren();
-    const badge = find("pending");
-    badge.hidden = !saveError && !(folder && count);
-    badge.textContent = saveError ? "!" : count;
-    const notice = saveError ? " · 저장 재시도 필요" : folder && count ? ` · 원본 ${count}개 폴더 저장 가능` : "";
-    toggleFor("originals").setAttribute("aria-label", "원본 보관" + notice);
-    toggleFor("originals").title = "원본 보관" + notice;
+    renderStorageSettings();
     if (saveError) {
       const retry = document.createElement("button");
       retry.textContent = captures[0]?.recorded || captures[0]?.originalOnly ? "원본 보관 재시도" : "기록 저장 재시도";
@@ -573,28 +598,31 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     if (!firstName) return;
     const retry = document.createElement("button");
     const details = document.createElement("p");
-    details.textContent = folder ? `폴더에 옮길 원본 ${count}개` : `앱에 보관된 원본 ${count}개`;
+    details.textContent = `보관된 원본 ${count}개`;
     slot.append(details);
-    retry.textContent = folder ? `원본 ${count}개 폴더에 저장` : "원본 다운로드";
+    retry.textContent = "원본 다운로드";
     retry.onclick = () => run(async () => {
-      if (!folder) {
-        const file = await galleryRequest("pending", "readonly", store => store.get(firstName));
-        if (file) requestDownload(file);
-        status("다운로드 후 파일을 확인하고 아래 버튼을 누르세요.");
-        return;
-      }
-      const names = await galleryRequest("pending", "readonly", store => store.getAllKeys());
-      for (const name of names) {
-        const file = await galleryRequest("pending", "readonly", store => store.get(name));
-        if (!file) continue;
-        await writeOriginal(file, folder);
-        await galleryRequest("pending", "readwrite", store => store.delete(name));
-      }
-      status("대기 중인 원본을 폴더에 저장했습니다.");
-      await refreshRecovery();
+      const file = await galleryRequest("pending", "readonly", store => store.get(firstName));
+      if (file) requestDownload(file);
+      status("다운로드 후 파일을 확인하고 아래 버튼을 누르세요.");
     });
     slot.append(retry);
-    if (!folder) {
+    if (folder) {
+      const copyArchive = document.createElement("button");
+      copyArchive.textContent = `보관된 원본 ${count}개를 폴더로 복사`;
+      copyArchive.onclick = () => run(async () => {
+        const names = await galleryRequest("pending", "readonly", store => store.getAllKeys());
+        for (const name of names) {
+          const file = await galleryRequest("pending", "readonly", store => store.get(name));
+          if (file) await writeOriginal(file, folder);
+        }
+        phoneCopyIssue = "";
+        renderStorageSettings();
+        status("보관된 원본을 폴더에 복사했습니다.");
+      });
+      slot.append(copyArchive);
+    }
+    {
       const confirm = document.createElement("button");
       confirm.textContent = "다운로드 확인 후 보관함에서 제거";
       confirm.title = firstName;
@@ -610,34 +638,66 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     }
   }
 
-  async function archive(file, directory) {
-    let queued = false;
+  function renderStorageSettings() {
+    const hasPicker = typeof window.showDirectoryPicker === "function";
+    find("phone-mode").dataset.phoneMode = copyMode;
+    for (const [control, value] of [["phone-off", "off"], ["gallery", "folder"], ["phone-download", "download"]]) {
+      find(control).setAttribute("aria-pressed", String(copyMode === value));
+    }
+    let location = "새 사진과 영상은 이 기기의 앱에 보관합니다.";
+    if (copyMode === "download") location = "새 사진과 영상을 앱에 보관하고 다운로드도 요청합니다.";
+    if (copyMode === "folder") location = folder ? `앱과 휴대폰 폴더 ‘${folder.name}’에 저장합니다.` :
+      "폴더 권한이 필요합니다. 다시 연결할 때까지 새 파일은 앱에 보관합니다.";
+    if (!hasPicker) location += " 이 브라우저에서는 폴더를 선택할 수 없습니다.";
+    find("location").textContent = location;
+    find("gallery").textContent = folder ? "저장 폴더 변경" : "폴더에도 저장";
+    find("phone-reconnect").hidden = !(copyMode === "folder" && !folder && storedFolder?.requestPermission);
+    find("phone-notice").textContent = phoneCopyIssue;
+    find("phone-notice").hidden = !phoneCopyIssue;
+    const attention = saveError || phoneCopyIssue || (copyMode === "folder" && !folder);
+    find("pending").hidden = !attention;
+    find("pending").textContent = "!";
+    const label = attention ? "카메라 설정 · 저장 상태 확인" : "카메라 설정";
+    toggleFor("originals").setAttribute("aria-label", label);
+    toggleFor("originals").title = label;
+  }
+
+  async function archive(shot) {
+    const {file, directory} = shot;
+    let storageError;
     try {
       await galleryRequest("pending", "readwrite", store => store.put(file, file.name));
-      queued = true;
     } catch (error) {
-      if (!directory) throw error;
+      storageError = error;
     }
-    if (directory) {
+    if (!shot.extraAttempted && shot.copyMode !== "off") {
+      shot.extraAttempted = true;
       try {
-        await writeOriginal(file, directory);
-        if (queued) await galleryRequest("pending", "readwrite", store => store.delete(file.name));
-        return "원본 폴더에 저장했습니다.";
+        if (shot.copyMode === "download") {
+          requestDownload(file);
+          shot.extraMessage = "다운로드를 요청했습니다.";
+        } else if (directory) {
+          await writeOriginal(file, directory);
+          shot.extraMessage = "선택한 폴더에도 저장했습니다.";
+        }
       } catch (error) {
-        if (!queued) throw error;
-        return "원본은 앱에 보관했습니다. 폴더 저장을 재시도할 수 있습니다.";
+        if (directory && folder === directory && ["NotAllowedError", "NotFoundError", "SecurityError"].includes(error.name)) folder = null;
+        phoneCopyIssue = shot.copyMode === "folder" ? "폴더에 사본을 저장하지 못했습니다. 폴더를 다시 선택하거나 다운로드를 이용하세요." :
+          "다운로드를 요청하지 못했습니다. 보관된 원본에서 다시 내려받을 수 있습니다.";
+        renderStorageSettings();
       }
     }
-    return "원본은 앱에 보관했습니다.";
+    if (storageError) throw storageError;
+    return shot.extraMessage || "원본은 앱에 보관했습니다.";
   }
 
   function keepOriginal(shot) {
     // A later shot can finish encoding while an earlier one is still saving.
-    return archive(shot.file, shot.directory).then(message => ({message}), error => ({error}));
+    return archive(shot).then(message => ({message}), error => ({error}));
   }
 
   function enqueueCapture(blob, takenAt, poster, originalOnly = false) {
-    const shot = {directory: folder, recorded: false, originalOnly};
+    const shot = {directory: folder, copyMode, recorded: false, originalOnly};
     const file = Promise.resolve(blob).then(result => captureName(result, takenAt));
     if (!originalOnly) review.add(file, poster);
     shot.ready = file.then(result => {
@@ -701,7 +761,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
         break;
       }
     }
-    if (openPane === "originals" || folder || saveError) {
+    if (openPane === "originals" || saveError) {
       await refreshRecovery().catch(() => status("원본 보관함을 읽지 못했습니다.", true));
     }
   }
@@ -910,13 +970,40 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     }
     takePhoto();
   };
-  find("gallery").onclick = () => run(async () => {
-    const message = await prepareGallery();
-    folder = await currentFolder();
-    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "원본은 이 기기의 앱에 보관합니다.";
-    status(message);
+  async function changeCopyMode(next, writable = null) {
+    await galleryRequest("settings", "readwrite", store => store.put(next, "phoneCopyMode"));
+    copyMode = next;
+    folder = writable;
+    phoneCopyIssue = "";
     await refreshRecovery();
-    if (!folder && !message.includes("취소")) showPane("originals");
+  }
+  find("phone-off").onclick = () => run(() => changeCopyMode("off"));
+  find("phone-download").onclick = () => run(() => changeCopyMode("download"));
+  find("phone-reconnect").onclick = () => run(async () => {
+    try {
+      // Request while the button activation is still live; the handle was loaded at camera startup.
+      if (await storedFolder.requestPermission(folderAccess) === "granted") {
+        await changeCopyMode("folder", storedFolder);
+        return;
+      }
+    } catch { /* The stored directory may have been moved or removed. */ }
+    phoneCopyIssue = "폴더 권한을 얻지 못했습니다. 다른 폴더를 선택하거나 다운로드를 이용하세요.";
+    renderStorageSettings();
+  });
+  find("gallery").onclick = () => run(async () => {
+    try {
+      const directory = await chooseOriginalFolder();
+      storedFolder = directory;
+      copyMode = "folder";
+      folder = await writableFolder(directory);
+      phoneCopyIssue = "";
+      await refreshRecovery();
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        phoneCopyIssue = "폴더를 연결하지 못했습니다. 다른 폴더를 선택하거나 다운로드로 추가 저장할 수 있습니다.";
+        renderStorageSettings();
+      }
+    }
   });
   find("done").onclick = close;
   dialog.oncancel = event => { event.preventDefault(); if (openPane) showPane(null); else void close(); };
@@ -925,8 +1012,10 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   updateFrame();
   update();
   try {
-    folder = await currentFolder();
-    find("location").textContent = folder ? `원본 폴더 · ${folder.name}` : "원본은 이 기기의 앱에 보관합니다.";
+    const phoneSettings = await readPhoneCopySettings();
+    copyMode = phoneSettings.mode;
+    storedFolder = phoneSettings.directory;
+    folder = phoneSettings.writable;
     await refreshRecovery();
     if (closed) return;
     await startPreview();
