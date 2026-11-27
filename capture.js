@@ -278,7 +278,7 @@ function cameraIcon(name) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${cameraIcons[name]}</svg>`;
 }
 
-export async function openCamera({onCapture, onClose, onNotice}) {
+export async function openCamera({onCapture, onEditPhoto, onClose, onNotice}) {
   if (activeCamera) return;
   const dialog = document.createElement("dialog");
   activeCamera = dialog;
@@ -709,7 +709,25 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   function enqueueCapture(blob, takenAt, poster, originalOnly = false) {
     const shot = {directory: folder, copyMode, recorded: false, originalOnly};
     const file = Promise.resolve(blob).then(result => captureName(result, takenAt));
-    if (!originalOnly) review.add(file, poster);
+    if (!originalOnly) {
+      const saveEdit = onEditPhoto && (async image => {
+        if (!shot.recorded || !shot.archived) await drainCaptures();
+        if (!shot.recorded) throw new Error("원본을 기록에 저장한 뒤 다시 시도하세요.");
+        if (!shot.archived) throw new Error("카메라 설정에서 원본 보관을 재시도한 뒤 표시를 저장하세요.");
+        // An original may have been manually cleared since capture. Restore only the source being edited.
+        try {
+          await galleryRequest("pending", "readwrite", store => {
+            const key = store.getKey(shot.file.name);
+            key.onsuccess = () => { if (key.result === undefined) store.put(shot.file, shot.file.name); };
+            return key;
+          });
+        } catch {
+          throw new Error("원본을 보관할 공간이 필요합니다. 공간을 확보한 뒤 다시 저장하세요.");
+        }
+        shot.attachment = await onEditPhoto(shot.attachment, image);
+      });
+      review.add(file, poster, saveEdit);
+    }
     shot.ready = file.then(result => {
       shot.file = result;
       shot.backup = keepOriginal(shot);
@@ -744,7 +762,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       }
       try {
         if (!shot.recorded && !shot.originalOnly) {
-          await onCapture(shot.file);
+          shot.attachment = await onCapture(shot.file);
           shot.recorded = true;
         }
         shot.backup ??= keepOriginal(shot);
@@ -753,6 +771,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           shot.backup = null;
           throw original.error;
         }
+        shot.archived = true;
         captures.shift();
         if (shot.originalOnly) {
           failedExposures++;

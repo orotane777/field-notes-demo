@@ -259,6 +259,8 @@
 }
 .review-header h2 { margin: 0; font-size: 1.15rem; line-height: 1.2; font-weight: 650; }
 .review-header svg { width: 1.4rem; height: 1.4rem; }
+.review-header [data-review-edit] { margin-inline-start: .3rem; }
+.review-notice { margin: 0; padding: .5rem 1rem; color: #ffd5a4; font-size: .9rem; }
 .review-header [data-review-count] {
   margin-inline-start: auto;
   color: #c0c0c4;

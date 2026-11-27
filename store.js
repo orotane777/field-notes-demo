@@ -191,6 +191,20 @@ export function addFiles(record, entryId, files, entrySeed) {
   });
 }
 
+export function replacePhoto(recordId, entryId, previousId, image) {
+  const type = mediaType(image);
+  if (!type?.startsWith("image/")) throw new Error("표시한 사진을 저장할 수 없습니다.");
+  return change(recordId, undefined, (record, blobs) => {
+    const entry = record.entries.find(item => item.id === entryId);
+    const index = entry?.media.findIndex(item => item.id === previousId && item.kind === "photo") ?? -1;
+    if (record.deletedAt || index < 0) throw new Error("사진이 삭제되었거나 다른 곳에서 변경되었습니다.");
+    // Upload receipts refer to immutable file IDs. Keep the photo's position and number when its bytes change.
+    const id = crypto.randomUUID();
+    entry.media[index] = {...entry.media[index], id, type};
+    blobs.add(image.type === type ? image : image.slice(0, image.size, type), id);
+  });
+}
+
 async function send(url, options = {}) {
   const { timeout = 30000, ...request } = options;
   const controller = new AbortController();

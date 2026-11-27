@@ -7,6 +7,7 @@ import {
   listRecords,
   updateRecord,
   addFiles,
+  replacePhoto,
   getBlob,
   syncPending,
 } from "./store.js";
@@ -351,13 +352,15 @@ async function start() {
       markStarted();
       state.textContent = "자료 저장 중…";
       try {
-        await queued(async () => {
+        const added = await queued(async () => {
           ctx.record = await addFiles(ctx.record, entry.id, files, entry);
           remember(ctx.record);
+          return ctx.record.entries.find(item => item.id === entry.id).media.slice(-files.length);
         });
         state.textContent = savedLabel;
         if (showThumbnails) refreshMedia();
         scheduleSync();
+        return added;
       } catch (err) {
         state.textContent = "자료 저장 실패";
         throw err;
@@ -389,7 +392,18 @@ async function start() {
         const openingRevision = ctx.record.revision;
         try {
           await openCamera({
-            onCapture: (file) => add([file], { showThumbnails: false }),
+            onCapture: async file => (await add([file], { showThumbnails: false }))[0],
+            onEditPhoto: (previous, image) => queued(async () => {
+              ctx.record = await replacePhoto(ctx.record.id, entry.id, previous.id, image);
+              const url = urls.get(previous.id);
+              if (url) {
+                URL.revokeObjectURL(url);
+                urls.delete(previous.id);
+              }
+              scheduleSync();
+              return ctx.record.entries.find(item => item.id === entry.id).media
+                .find(item => item.kind === "photo" && item.number === previous.number);
+            }),
             onClose: () => {
               pickerActive = false;
               if (ctx.record.revision !== openingRevision) refreshMedia();

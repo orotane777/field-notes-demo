@@ -1,0 +1,147 @@
+.photo-markup {
+  position: fixed;
+  inset: auto 0;
+  top: calc(var(--markup-top, 0px) + (var(--markup-height, 100dvh) - min(52rem, var(--markup-height, 100dvh))) / 2);
+  box-sizing: border-box;
+  width: min(54rem, 100vw);
+  height: min(52rem, var(--markup-height, 100dvh));
+  max-width: 100vw;
+  max-height: none;
+  margin: 0 auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #38383b;
+  border-radius: 1.1rem;
+  background: #141416;
+  color: #f8f8f8;
+  color-scheme: dark;
+  font: 500 1rem/1.35 Roboto, "Malgun Gothic", system-ui, sans-serif;
+  overscroll-behavior: contain;
+}
+.photo-markup[open] { display: flex; flex-direction: column; }
+.photo-markup::backdrop { background: rgb(0 0 0 / 82%); }
+.photo-markup [hidden] { display: none !important; }
+.photo-markup button {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: .65rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  touch-action: manipulation;
+}
+.photo-markup button:disabled { opacity: .38; cursor: default; }
+.photo-markup :is(button, textarea):focus-visible { outline: 2px solid #ffdb66; outline-offset: -2px; }
+.photo-markup svg { width: 1.35rem; height: 1.35rem; }
+.markup-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: .25rem;
+  padding: max(.3rem, env(safe-area-inset-top)) max(.7rem, env(safe-area-inset-right)) .3rem max(.3rem, env(safe-area-inset-left));
+}
+.markup-header h2 { flex: 1; margin: 0 0 0 .05rem; color: inherit; font-size: 1.08rem; line-height: 1.25; }
+.photo-markup .markup-save,
+.photo-markup [data-markup-text-add] {
+  min-height: 44px;
+  padding: 0 1rem;
+  border-radius: 1.5rem;
+  background: #ffdb66;
+  color: #191816;
+  font-size: .91rem;
+  font-weight: 700;
+}
+.markup-stage {
+  position: relative;
+  container-type: size;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #050505;
+}
+.markup-picture {
+  position: absolute;
+  inset: 0;
+  width: min(100cqw, calc(100cqh * var(--markup-ratio, 1)));
+  height: min(100cqh, calc(100cqw / var(--markup-ratio, 1)));
+  margin: auto;
+  user-select: none;
+}
+.markup-picture img, .markup-picture canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+}
+.markup-picture img { object-fit: fill; pointer-events: none; }
+.markup-picture canvas { touch-action: none; cursor: crosshair; }
+.photo-markup .markup-hint {
+  flex: none;
+  margin: 0;
+  padding: .5rem .8rem .15rem;
+  color: #d3d3d7;
+  font-size: .78rem;
+  line-height: 1.45;
+  text-align: center;
+}
+.markup-toolbar, .markup-writing {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: .25rem max(.5rem, env(safe-area-inset-right)) max(.55rem, env(safe-area-inset-bottom)) max(.5rem, env(safe-area-inset-left));
+}
+.markup-tools, .markup-colors { display: flex; align-items: center; justify-content: center; }
+.markup-colors { margin-inline-start: .55rem; padding-inline-start: .55rem; border-inline-start: 1px solid #444448; }
+.photo-markup [data-markup-tool] {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: .12rem;
+  min-width: 3.15rem;
+  height: 3.2rem;
+  padding: .2rem .35rem;
+  font-size: .74rem;
+}
+.photo-markup [data-markup-tool][aria-pressed="true"] { background: #323231; color: #ffdb66; }
+.photo-markup [data-markup-color] { padding: 0; }
+.photo-markup [data-markup-color] i { display: block; width: 1.05rem; height: 1.05rem; border-radius: 50%; }
+.photo-markup [data-markup-color][aria-pressed="true"] i { outline: 1.5px solid white; outline-offset: 3px; }
+.photo-markup.is-writing .markup-toolbar { display: none; }
+.markup-writing { gap: .55rem; padding-block-start: .5rem; }
+.photo-markup [data-markup-text] {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: .45rem .65rem;
+  border: 1px solid #66666b;
+  border-radius: .6rem;
+  background: #242427;
+  color: white;
+  font: inherit;
+  line-height: 1.3;
+  resize: none;
+  user-select: text;
+}
+@media (max-width: 680px), (max-height: 540px) {
+  .photo-markup {
+    top: var(--markup-top, 0px);
+    width: 100vw;
+    height: var(--markup-height, 100dvh);
+    border: 0;
+    border-radius: 0;
+  }
+}
+@media (max-width: 350px) {
+  .photo-markup [data-markup-tool] { min-width: 44px; }
+  .markup-colors { margin-inline-start: .2rem; padding-inline-start: .2rem; }
+}

@@ -1,9 +1,10 @@
 const base = new URL("./", self.location.href);
 const prefix = "fieldnotes-shell:" + encodeURIComponent(base.pathname) + ":";
-const CACHE = prefix + "3a97da1817c0a818";
+const CACHE = prefix + "2444d944657120c8";
 const files = [
   "index.html", "app.js", "shared.js", "store.js", "runtime.js", "deployment.js",
   "style.css", "capture.js", "capture-review.js", "gallery.js", "capture.css", "viewer.html", "viewer.js",
+  "photo-markup.js", "photo-markup.css",
   "manifest.webmanifest", "icon-192.png", "icon-512.png",
 ];
 const shell = new Set(files.map((file) => new URL(file, base).pathname));

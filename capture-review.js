@@ -1,5 +1,6 @@
 const emptyIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="4"/><path d="m4 17 5-5 4 4 3-3 4 4"/><circle cx="15.8" cy="9" r="1.5"/></svg>';
 const backIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg>';
+const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 16-.8 4.8L8 20l12-12a2.8 2.8 0 0 0-4-4L4 16ZM14 6l4 4"/></svg>';
 
 async function squareThumbnail(source, width, height) {
   const side = Math.min(width, height);
@@ -58,11 +59,15 @@ export function createCaptureReview(camera) {
       <button type="button" data-review-back aria-label="카메라로 돌아가기">${backIcon}</button>
       <h2 id="capture-review-title">이번 촬영</h2>
       <span data-review-count></span>
+      <button type="button" data-review-edit aria-label="사진에 표시" title="사진에 표시" hidden>${editIcon}</button>
     </header>
+    <p class="review-notice" role="status" hidden></p>
     <div class="review-grid" data-review-grid></div>
     <div class="review-detail" data-review-detail hidden></div>`;
   camera.append(panel);
   const back = panel.querySelector("[data-review-back]");
+  const edit = panel.querySelector("[data-review-edit]");
+  const notice = panel.querySelector(".review-notice");
   const title = panel.querySelector("h2");
   const count = panel.querySelector("[data-review-count]");
   const grid = panel.querySelector("[data-review-grid]");
@@ -72,6 +77,7 @@ export function createCaptureReview(camera) {
   let sequence = 0, available = true, disposed = false, rendering = false, selected = null;
 
   function updateLabels() {
+    edit.hidden = !selected?.saveEdit;
     trigger.disabled = !available || !items.length;
     trigger.setAttribute("aria-label", items.length ? `이번 촬영 ${items.length}개 보기` : "이번 촬영 없음");
     count.textContent = selected ? `${items.indexOf(selected) + 1} / ${items.length}` : `${items.length}개`;
@@ -86,6 +92,7 @@ export function createCaptureReview(camera) {
     detail.replaceChildren();
   }
   function openDetail(item) {
+    notice.hidden = true;
     selected = item;
     title.textContent = item.video ? "영상" : "사진";
     back.setAttribute("aria-label", "이번 촬영 목록으로");
@@ -104,6 +111,7 @@ export function createCaptureReview(camera) {
     back.focus({preventScroll: true});
   }
   function goBack() {
+    notice.hidden = true;
     if (selected) {
       releaseDetail();
       grid.hidden = false;
@@ -119,13 +127,57 @@ export function createCaptureReview(camera) {
     }
   }
   back.onclick = goBack;
+  edit.onclick = async () => {
+    const item = selected;
+    if (!item?.saveEdit || edit.disabled) return;
+    edit.disabled = true;
+    notice.hidden = true;
+    try {
+      const {openPhotoMarkup} = await import("./photo-markup.js");
+      if (disposed || selected !== item) return;
+      await openPhotoMarkup({
+        parent: panel, source: item.source, marks: structuredClone(item.marks),
+        onSave: async ({blob, marks}) => {
+          const file = marks.length ? blob : item.source;
+          const url = URL.createObjectURL(file);
+          try {
+            await item.saveEdit(file);
+          } catch (error) {
+            URL.revokeObjectURL(url);
+            throw error;
+          }
+          if (disposed) { URL.revokeObjectURL(url); return; }
+          const previousUrl = item.url;
+          const previousThumbnail = item.thumbnail;
+          item.url = url;
+          item.thumbnail = null;
+          item.content = file;
+          item.marks = marks;
+          if (selected === item) detail.querySelector("img").src = url;
+          showImage(item.tile, url, false);
+          if (item === items.at(-1)) showImage(trigger, url, false);
+          URL.revokeObjectURL(previousUrl);
+          if (previousThumbnail) URL.revokeObjectURL(previousThumbnail);
+          previewQueue.push({item, file});
+          void renderPreviews();
+        }
+      });
+    } catch (error) {
+      notice.textContent = error.message || "사진 표시 도구를 열 수 없습니다.";
+      notice.hidden = false;
+    } finally {
+      edit.disabled = false;
+      if (!disposed && selected === item) edit.focus({preventScroll: true});
+    }
+  };
   panel.oncancel = event => {
+    if (event.target !== panel) return;
     event.preventDefault();
     event.stopPropagation();
     goBack();
   };
   panel.onkeydown = event => {
-    if (event.key !== "Escape" || document.fullscreenElement) return;
+    if (event.key !== "Escape" || event.target.closest("dialog") !== panel || document.fullscreenElement) return;
     event.preventDefault();
     event.stopPropagation();
     goBack();
@@ -153,11 +205,14 @@ export function createCaptureReview(camera) {
       // Prefer the newest shot for the shutter-side thumbnail; decode just one image at a time.
       while (!disposed && previewQueue.length) {
         const {item, file, poster} = previewQueue.pop();
+        if (file !== item.content) continue;
         let thumbnail;
         try {
           thumbnail = await poster || await (item.video ? videoThumbnail(item.url) : photoThumbnail(file));
         } catch { /* A failed thumbnail must leave the full capture available. */ }
         if (disposed) return;
+        if (file !== item.content) continue;
+        if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
         if (thumbnail) item.thumbnail = URL.createObjectURL(thumbnail);
         const url = item.thumbnail || (!item.video && item.url);
         if (url) {
@@ -170,10 +225,12 @@ export function createCaptureReview(camera) {
     }
   }
 
-  function append(file, order, poster) {
+  function append(file, order, poster, saveEdit) {
     if (disposed || !file?.size) return;
     const tile = document.createElement("button");
-    const item = {order, tile, url: URL.createObjectURL(file), video: file.type.startsWith("video/")};
+    const video = file.type.startsWith("video/");
+    const item = {order, tile, url: URL.createObjectURL(file), video, content: file,
+      source: video ? null : file, marks: [], saveEdit: video ? null : saveEdit};
     tile.type = "button";
     tile.dataset.reviewItem = String(order);
     tile.value = String(order);
@@ -192,11 +249,11 @@ export function createCaptureReview(camera) {
   }
   updateLabels();
   return {
-    add(filePromise, poster) {
+    add(filePromise, poster, saveEdit) {
       const order = ++sequence;
       // Handle both promises immediately, including captures that fail before encoding finishes.
       const safePoster = Promise.resolve(poster).catch(() => null);
-      Promise.resolve(filePromise).then(file => append(file, order, safePoster), () => {});
+      Promise.resolve(filePromise).then(file => append(file, order, safePoster, saveEdit), () => {});
     },
     setAvailable(value) {
       if (available !== value) { available = value; updateLabels(); }
