@@ -145,8 +145,6 @@ h2 {
 .page-title,
 .desk-head,
 .section-head,
-.heading-tools,
-.editor-foot,
 .capture-actions {
   display: flex;
   align-items: center;
@@ -158,12 +156,38 @@ h2 {
   position: relative;
   margin: 4px 0 24px;
 }
-.heading-tools {
-  justify-content: flex-end;
-  margin-top: 8px;
+.note-heading {
+  margin: -8px 0 16px;
 }
-.heading-tools:empty {
-  display: none;
+.note-heading h1 {
+  line-height: 1;
+}
+.record-time {
+  min-height: 36px;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+}
+.note-title {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: clamp(22px, 5.5vw, 34px);
+  font-weight: 750;
+  letter-spacing: -.045em;
+  text-overflow: ellipsis;
+}
+.note-title:focus {
+  border-bottom-color: var(--green);
+  outline: 0;
+  text-overflow: clip;
 }
 .eyebrow {
   font-size: 13px;
@@ -193,9 +217,34 @@ h2 {
 .section-head {
   align-items: baseline;
 }
-.input-label {
-  font-size: 17px;
-  font-weight: 750;
+.memo-tools {
+  align-items: center;
+}
+.note-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: -5px;
+}
+.note-tool {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--green);
+}
+.note-tool svg {
+  width: 23px;
+  height: 23px;
+}
+.note-tool:hover:enabled, .note-tool:focus-visible {
+  background: #e8eee4;
+}
+.note-tool:disabled {
+  opacity: .36;
+  cursor: default;
 }
 .save-state,
 .count,
@@ -321,8 +370,13 @@ h2 {
 .text-btn:hover {
   text-decoration: underline;
 }
-.editor-foot {
-  margin: 5px 2px 20px;
+.compose + .history {
+  margin-top: 16px;
+}
+.history .entry:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 .record-tools {
   text-align: right;
@@ -838,11 +892,6 @@ h2 {
   }
 }
 @media (min-width: 650px) {
-  .heading-tools {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-  }
   .workspace {
     padding-top: 44px;
   }

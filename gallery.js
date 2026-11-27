@@ -7,6 +7,16 @@ const pageSize = 18;
 const fileNames = new Intl.Collator("ko", { numeric: true });
 
 export const supportsAlbums = () => typeof window.showDirectoryPicker === "function";
+export const chooseMediaHandles = () => window.showOpenFilePicker({
+  id: "field-note-media",
+  startIn: "pictures",
+  multiple: true,
+  excludeAcceptAllOption: true,
+  types: [{ description: "사진 및 영상", accept: {
+    "image/*": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".avif", ".bmp", ".tif", ".tiff"],
+    "video/*": [".mp4", ".m4v", ".mov", ".webm", ".mkv", ".3gp", ".avi"],
+  } }],
+});
 const readAlbum = () =>
   galleryRequest("settings", "readonly", (store) => store.get(albumKey));
 export const currentAlbum = async () => (await readAlbum())?.folder;

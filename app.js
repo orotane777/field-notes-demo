@@ -12,7 +12,7 @@ import {
   syncPending,
 } from "./store.js";
 import { openCamera, prepareGallery } from "./capture.js";
-import { chooseAlbum, currentAlbum, forgetAlbum, openRecentAlbum, supportsAlbums } from "./gallery.js";
+import { chooseAlbum, chooseMediaHandles, currentAlbum, forgetAlbum, openRecentAlbum, supportsAlbums } from "./gallery.js";
 import { apiPath, installOfflineShell, staticSample, storageKey, viewerPath } from "./runtime.js";
 import {
   el,
@@ -113,6 +113,8 @@ async function start() {
   }
   function remember(record) {
     try {
+      const last = pref("field.last");
+      if (last && last !== record.id) localStorage.setItem(storageKey("field.previous"), last);
       localStorage.setItem(storageKey("field.last"), record.id);
     } catch {}
   }
@@ -122,6 +124,21 @@ async function start() {
     } catch {
       return fallback;
     }
+  }
+  async function previousRecord(currentId) {
+    for (const id of [pref("field.last"), pref("field.previous")]) {
+      if (!id || id === currentId) continue;
+      const record = await getRecord(id);
+      if (record && !record.deletedAt) return record;
+    }
+    // Older installations only remembered one ID. Use the most recent remaining entry.
+    let previous = null, latest = "";
+    for (const record of await listRecords()) {
+      if (record.id === currentId || record.deletedAt) continue;
+      const stamp = record.entries.reduce((at, entry) => entry.at > at ? entry.at : at, record.recordedAt);
+      if (stamp > latest) { previous = record; latest = stamp; }
+    }
+    return previous;
   }
   function releaseURLs() {
     for (const url of urls.values()) URL.revokeObjectURL(url);
@@ -148,6 +165,11 @@ async function start() {
     const token = ++generation;
     await queue;
     if (token !== generation) return;
+    if (editor?.titleFailed) {
+      notice("제목을 저장하지 못했습니다. 제목을 다시 확인해 주세요.", true);
+      app.querySelector("[data-note-title]")?.focus();
+      return;
+    }
     if (editor?.unsaved) {
       notice(
         "저장하지 못한 메모가 있습니다. 다시 저장하거나 메모를 복사해 두세요.",
@@ -167,7 +189,7 @@ async function start() {
         b.dataset.page === name ? "page" : "false",
       );
     if (name === "write") {
-      let rec = options.record;
+      let rec = options.record && await getRecord(options.record.id);
       if (
         !rec &&
         !options.fresh &&
@@ -210,8 +232,32 @@ async function start() {
       started: !!editId,
       customMetadata: false,
       unsaved: false,
+      titleFailed: false,
     };
     editor = ctx;
+    const head = el("header", "note-heading");
+    const heading = el("h1");
+    const titleField = el("input", "note-title");
+    titleField.type = "text";
+    titleField.dataset.noteTitle = "";
+    titleField.setAttribute("aria-label", "기록 제목");
+    titleField.enterKeyHint = "done";
+    titleField.value = record.title;
+    let titleTarget = record.title;
+    const recordTime = button("", () => editRecordTime(ctx, refreshHeading), "record-time");
+    recordTime.dataset.recordTime = "";
+    recordTime.title = "기록 일시 수정";
+    function refreshHeading() {
+      titleTarget = ctx.record.title;
+      titleField.value = titleTarget;
+      heading.setAttribute("aria-label", titleTarget);
+      recordTime.textContent = longDate(ctx.record.recordedAt) + " · " + shortTime(ctx.record.recordedAt);
+      recordTime.setAttribute("aria-label", "기록 일시 수정, " + recordTime.textContent);
+    }
+    refreshHeading();
+    heading.append(titleField);
+    head.append(recordTime, heading);
+    app.append(head);
     function markStarted() {
       if (ctx.started) return;
       ctx.started = true;
@@ -219,47 +265,40 @@ async function start() {
       if (!existing && !ctx.customMetadata) {
         ctx.record.recordedAt = now;
         ctx.record.title = defaultTitle(now);
+        refreshHeading();
       }
       entry.at = existing ? now : ctx.record.recordedAt;
     }
-    const head = titleRow(
-      longDate(record.recordedAt),
-      existing ? "기록 이어쓰기" : "새 기록",
-    );
-    const tools = el("div", "heading-tools");
-    if (existing)
-      tools.append(
-        button("＋ 새 기록", () => go("write", { fresh: true }), "text-btn"),
-      );
-    else if (pref("field.last"))
-      tools.append(
-        button(
-          "직전 기록 이어쓰기",
-          submitAction(async () => {
-            const last = await getRecord(pref("field.last"));
-            if (last && !last.deletedAt) await go("write", { record: last });
-            else notice("직전 기록이 휴지통에 있습니다.");
-          }),
-          "text-btn",
-        ),
-      );
-    head.append(tools);
-    app.append(head);
+    async function saveTitle() {
+      const typed = titleField.value.trim();
+      const next = typed || defaultTitle(ctx.record.recordedAt);
+      titleField.value = next;
+      if (next === titleTarget && !ctx.titleFailed) return;
+      markStarted();
+      titleTarget = next;
+      titleField.value = next;
+      ctx.titleFailed = false;
+      try {
+        await commit(ctx, r => { r.title = next; });
+        heading.setAttribute("aria-label", ctx.record.title);
+      } catch {
+        if (titleTarget === next) ctx.titleFailed = true;
+      }
+    }
+    titleField.onchange = titleField.onblur = saveTitle;
+    titleField.onkeydown = event => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Escape") {
+        if (ctx.titleFailed) { titleTarget = ctx.record.title; ctx.titleFailed = false; }
+        titleField.value = titleTarget;
+      } else if (event.key !== "Enter") return;
+      event.preventDefault();
+      titleField.blur();
+    };
+    let history;
     if (existing) {
-      const history = el("section", "panel history");
-      const header = el("div", "section-head");
-      header.append(
-        el("h2", "", record.title),
-        button("정보 수정", () => metadata(ctx), "text-btn"),
-      );
-      history.append(header);
-      history.append(
-        el(
-          "p",
-          "hint",
-          longDate(record.recordedAt) + " " + shortTime(record.recordedAt),
-        ),
-      );
+      history = el("section", "panel history");
+      history.setAttribute("aria-label", "이전 입력 내용");
       for (const [index, e] of record.entries.entries()) {
         if (e.id === editId) continue;
         const block = el("section", "entry");
@@ -288,27 +327,45 @@ async function start() {
           );
         history.append(block);
       }
-      app.append(history);
     }
     const panel = el("section", "panel compose");
-    const bar = el("div", "section-head");
-    const label = el(
-      "label",
-      "input-label",
-      editId ? "메모 수정" : existing ? "내용 덧붙이기" : "현장 메모",
-    );
-    label.htmlFor = "memo";
+    const bar = el("div", "section-head memo-tools");
+    const tools = el("div", "note-actions");
+    function iconButton(name, paths, action) {
+      const btn = button("", submitAction(action), "note-tool");
+      btn.title = name;
+      btn.setAttribute("aria-label", name);
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + "</svg>";
+      return btn;
+    }
+    const fresh = iconButton("새 기록", '<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8M13 3v5h5l-5-5Zm5 5v3M18 14v7m-3.5-3.5h7"/>', () => go("write", {fresh: true}));
+    fresh.dataset.newNote = "";
+    let previousId;
+    const previous = iconButton("직전 기록 이어쓰기", '<path d="M3 11a9 9 0 1 1 2 7M3 6v5h5m4-4v5l3 2"/>', async () => {
+      let last = previousId && await getRecord(previousId);
+      if (!last || last.deletedAt) last = await previousRecord(record.id);
+      if (last) await go("write", {record: last});
+      else previous.disabled = true;
+    });
+    previous.dataset.previousNote = "";
+    previous.disabled = true;
+    previousRecord(record.id).then(last => {
+      previousId = last?.id;
+      previous.disabled = !last;
+    }).catch(problem);
+    tools.append(previous, fresh);
     const state = el(
       "span",
       "save-state",
       record.revision ? savedLabel : "",
     );
     state.setAttribute("role", "status");
-    bar.append(label, state);
+    bar.append(tools, state);
     const area = el("textarea", "memo");
     area.id = "memo";
+    area.setAttribute("aria-label", editId ? "메모 수정" : existing ? "내용 덧붙이기" : "현장 메모");
     area.value = entry.text;
-    area.placeholder = "지금 보고 들은 내용을 기록하세요.";
+    area.placeholder = existing && !editId ? "덧붙일 내용을 기록하세요." : "지금 보고 들은 내용을 기록하세요.";
     const retryBox = el("div", "save-retry");
     ctx.retryBox = retryBox;
     retryBox.hidden = true;
@@ -418,8 +475,36 @@ async function start() {
       "btn primary camera-btn",
     );
     camera.prepend(el("i", "camera-icon"));
-    function openSystemPicker() {
+    let useFileInput = false;
+    async function openSystemPicker() {
       pickerActive = true;
+      if (!useFileInput && typeof window.showOpenFilePicker === "function") {
+        let handles;
+        try {
+          handles = await chooseMediaHandles();
+        } catch (error) {
+          if (error.name === "AbortError") {
+            pickerActive = false;
+            return;
+          }
+          useFileInput = true;
+          if (navigator.userActivation?.isActive === false) {
+            pickerActive = false;
+            notice("갤러리를 다시 눌러 사진과 영상을 선택하세요.");
+            return;
+          }
+        }
+        if (handles) {
+          try {
+            await add(await Promise.all(handles.map(handle => handle.getFile())));
+          } catch (error) {
+            problem(error);
+          } finally {
+            pickerActive = false;
+          }
+          return;
+        }
+      }
       try {
         if (file.showPicker) file.showPicker();
         else file.click();
@@ -429,7 +514,7 @@ async function start() {
       }
     }
     const gallery = button("갤러리", () => {
-      if (!supportsAlbums()) return openSystemPicker();
+      if (!supportsAlbums() || pref("field.gallery.start") !== "album") return openSystemPicker();
       pickerActive = true;
       openRecentAlbum(add, openSystemPicker).then((result) => {
         if (result !== "system") pickerActive = false;
@@ -439,17 +524,13 @@ async function start() {
       });
     }, "btn gallery-btn");
     gallery.dataset.openGallery = "";
+    gallery.dataset.galleryPicker = "";
     gallery.prepend(el("i", "gallery-icon"));
     actions.append(camera, gallery);
     panel.append(bar, area, retryBox, mediaBox, actions, file);
     app.append(panel);
     refreshMedia();
-    const foot = el("div", "editor-foot");
-    foot.append(
-      button("제목 · 일시 수정", () => metadata(ctx), "text-btn"),
-      button("＋ 새 기록", () => go("write", { fresh: true }), "text-btn"),
-    );
-    app.append(foot);
+    if (history?.childElementCount) app.append(history);
     if (editId)
       app.append(
         button(
@@ -506,11 +587,8 @@ async function start() {
       ),
     );
   }
-  function metadata(ctx) {
-    const { d, body } = dialog("기록 정보");
-    const title = el("input", "field");
-    title.value = ctx.record.title;
-    title.required = true;
+  function editRecordTime(ctx, refreshHeading) {
+    const { d, body } = dialog("기록 일시 수정");
     const date = el("input", "field");
     date.type = "datetime-local";
     date.step = "1";
@@ -522,31 +600,24 @@ async function start() {
       [dt.getHours(), dt.getMinutes(), dt.getSeconds()]
         .map((v) => String(v).padStart(2, "0"))
         .join(":");
-    const a = el("label", "", "제목"),
-      b = el("label", "", "기록 일시");
-    a.append(title);
-    b.append(date);
+    date.setAttribute("aria-label", "기록 일시");
     body.append(
-      a,
-      b,
+      date,
       button(
         "적용",
         submitAction(async () => {
-          if (!title.reportValidity() || !date.reportValidity()) return;
+          if (!date.reportValidity()) return;
+          const stamp = new Date(date.value).toISOString();
           const change = (r) => {
-            const chosenTitle = title.value.trim() || r.title;
-            const stamp = new Date(date.value).toISOString();
-            r.title =
-              chosenTitle === defaultTitle(r.recordedAt)
-                ? defaultTitle(stamp)
-                : chosenTitle;
+            if (r.title === defaultTitle(r.recordedAt)) r.title = defaultTitle(stamp);
+            if (r.entries[0]?.at === r.recordedAt) r.entries[0].at = stamp;
             r.recordedAt = stamp;
           };
           ctx.customMetadata = true;
-          if (ctx.record.revision) await commit(ctx, change);
+          if (ctx.record.revision || ctx.started) await commit(ctx, change);
           else change(ctx.record);
+          refreshHeading();
           d.close();
-          if (ctx.record.revision) await go("write", { record: ctx.record });
         }),
         "btn primary",
       ),
@@ -648,23 +719,35 @@ async function start() {
     );
     if (supportsAlbums()) {
       const albumName = el("p", "hint");
+      const preference = el("label");
+      const preferAlbum = el("input");
+      preferAlbum.type = "checkbox";
+      preferAlbum.dataset.preferAlbum = "";
+      preferAlbum.onchange = () => localStorage.setItem(storageKey("field.gallery.start"), preferAlbum.checked ? "album" : "files");
+      preference.append(preferAlbum, document.createTextNode(" 연결한 앨범부터 열기"));
       const connect = button("카메라 앨범 연결", submitAction(async () => {
         const folder = await chooseAlbum();
-        if (folder) displayAlbum(folder);
+        if (folder) {
+          localStorage.setItem(storageKey("field.gallery.start"), "album");
+          displayAlbum(folder);
+        }
       }));
       connect.dataset.linkAlbum = "";
       const disconnect = button("연결 해제", submitAction(async () => {
         await forgetAlbum();
+        localStorage.removeItem(storageKey("field.gallery.start"));
         displayAlbum(null);
       }), "text-btn");
       function displayAlbum(folder) {
         albumName.textContent = folder
           ? folder.name + " · 읽기 전용"
-          : "DCIM/Camera처럼 사진이 들어 있는 폴더를 연결하세요.";
+          : "갤러리를 누르면 휴대폰의 파일 선택 화면이 열립니다. 특정 폴더를 최신순으로 보려면 앨범을 연결하세요.";
         connect.textContent = folder ? "다른 앨범 연결" : "카메라 앨범 연결";
         disconnect.hidden = !folder;
+        preference.hidden = !folder;
+        preferAlbum.checked = !!folder && pref("field.gallery.start") === "album";
       }
-      panel.append(el("h2", "", "갤러리에서 볼 최근 앨범"), albumName, connect, disconnect);
+      panel.append(el("h2", "", "갤러리에서 볼 최근 앨범"), albumName, connect, preference, disconnect);
       displayAlbum(null);
       try {
         displayAlbum(await currentAlbum());
