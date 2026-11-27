@@ -151,13 +151,18 @@ async function photoBlob(preview, frame, zoom, imageCapture, light) {
   }
 }
 
-function croppedRecording(preview, frame, currentZoom) {
+function croppedRecording(preview, frame, currentZoom, sourceLost) {
+  const source = preview.srcObject.getVideoTracks()[0];
   const canvas = framingCanvas(preview.videoWidth, preview.videoHeight, frame);
   const manual = typeof window.CanvasCaptureMediaStreamTrack?.prototype.requestFrame === "function";
   const stream = canvas.captureStream(manual ? 0 : 30);
   const [track] = stream.getVideoTracks();
   let timer;
   function draw() {
+    if (source.readyState !== "live") {
+      sourceLost();
+      return;
+    }
     const bounds = {x: 0, y: 0, w: preview.videoWidth, h: preview.videoHeight};
     if (!bounds.w || !bounds.h) return;
     drawFrame(canvas, preview, bounds, currentZoom());
@@ -528,7 +533,9 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     await preview.play();
     const track = live.getVideoTracks()[0];
     track.onended = () => {
+      if (stream?.getVideoTracks()[0] !== track) return;
       if (recorder?.state === "recording") recorder.stop();
+      else if (busy && mode === "video" && !closed) status("카메라 연결을 복구하고 있습니다.", true);
       else if (!closed) { status("카메라 연결이 끊겼습니다. 촬영 화면을 다시 열어 주세요.", true); update(); }
     };
     await configureCamera(track);
@@ -536,8 +543,11 @@ export async function openCamera({onCapture, onClose, onNotice}) {
 
   function update() {
     const recording = recorder?.state === "recording";
-    const available = !closed && !closing && !busy && stream?.getVideoTracks()[0]?.readyState === "live";
-    find("shutter").disabled = !available || (!!saveError && !recording);
+    const canAct = !closed && !closing && !busy;
+    const available = canAct && stream?.getVideoTracks()[0]?.readyState === "live";
+    // A running recorder can always be stopped. An interrupted video preview can be reopened on the next tap.
+    const canRecord = canAct && mode === "video" && !!stream;
+    find("shutter").disabled = recording ? !canAct : (!available && !canRecord) || !!saveError;
     find("photo").disabled = !available || recording || !!saveError;
     find("video").disabled = find("photo").disabled || typeof MediaRecorder !== "function" ||
       typeof HTMLCanvasElement.prototype.captureStream !== "function";
@@ -792,6 +802,62 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     microphone = undefined;
     clearInterval(recordingTime);
   }
+
+  async function reopenVideoPreview() {
+    status("카메라 연결을 복구하고 있습니다.", true);
+    const previousZoom = zoomControl.value;
+    const previousTorch = light === "torch";
+    try { await startPreview(); }
+    catch { throw new Error("카메라를 다시 열지 못했습니다. 영상 녹화를 다시 눌러 주세요."); }
+    if (!closed) {
+      zoomControl.value = previousZoom;
+      const changes = {};
+      if (hardwareZoom) changes.zoom = Number(zoomControl.value);
+      else digitalZoom = Number(zoomControl.value);
+      if (previousTorch && supportsTorch) changes.torch = true;
+      if (Object.keys(changes).length) {
+        const settings = await setCameraControls(changes).catch(() => stream.getVideoTracks()[0].getSettings());
+        if (hardwareZoom) zoomControl.value = settings.zoom;
+        light = settings.torch ? "torch" : "off";
+        setLightOptions();
+      }
+      updateFrame();
+    }
+  }
+
+  async function prepareRecordingSource(mimeType) {
+    // Acquiring the microphone or opening Downloads can end an older physical camera track.
+    for (let attempt = 0; attempt < 2 && !closed; attempt++) {
+      if (stream?.getVideoTracks()[0]?.readyState !== "live") await reopenVideoPreview();
+      if (closed) break;
+      const source = stream.getVideoTracks()[0];
+      let signalLoss;
+      const lost = new Promise(resolve => { signalLoss = () => resolve(false); });
+      const frames = croppedRecording(preview, recordingFrame, () => digitalZoom, () => {
+        signalLoss();
+        if (recordingFrames === frames && recorder?.state === "recording") recorder.stop();
+      });
+      recordingFrames = frames;
+      const warm = async () => {
+        await frames.start();
+        if (source.readyState !== "live") return false;
+        if (mimeType?.includes("vp8") && !vp8EncoderReady) {
+          status("녹화를 준비하고 있습니다.", true);
+          await prepareVp8Encoder(frames.stream).catch(() => {});
+        }
+        return source.readyState === "live";
+      };
+      try {
+        if (await Promise.race([warm(), lost]) && source.readyState === "live") return;
+      } catch (error) {
+        if (source.readyState === "live") throw error;
+      }
+      frames.stop();
+      recordingFrames = undefined;
+    }
+    throw new Error("카메라 연결이 끊겼습니다. 영상 녹화를 다시 눌러 주세요.");
+  }
+
   async function startRecording() {
     try {
       microphone = await navigator.mediaDevices.getUserMedia({audio: true});
@@ -812,13 +878,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     recordingResult.catch(() => {});
     try {
       recordingFrame = currentFrame();
-      recordingFrames = croppedRecording(preview, recordingFrame, () => digitalZoom);
-      await recordingFrames.start();
-      if (mimeType?.includes("vp8") && !vp8EncoderReady) {
-        status("녹화를 준비하고 있습니다.", true);
-        // Some implementations support recording only with the microphone attached.
-        await prepareVp8Encoder(recordingFrames.stream).catch(() => {});
-      }
+      await prepareRecordingSource(mimeType);
       recordingPoster = recordingFrames.poster().catch(() => null);
       const media = new MediaStream([...recordingFrames.stream.getVideoTracks(), ...(microphone?.getAudioTracks() || [])]);
       recorder = new MediaRecorder(media, {...(mimeType ? {mimeType} : {}), videoBitsPerSecond: 2000000});
