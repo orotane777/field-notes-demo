@@ -1,7 +1,9 @@
 import { storageKey } from "./runtime.js";
+import { createCaptureReview } from "./capture-review.js";
 
 let galleryDatabase;
 let activeCamera;
+let vp8EncoderReady = false;
 
 export async function galleryRequest(storeName, mode, operation) {
   if (!galleryDatabase) {
@@ -146,6 +148,14 @@ function croppedRecording(preview, frame, currentZoom) {
   }
   return {
     stream,
+    async poster() {
+      const thumb = document.createElement("canvas");
+      const scale = Math.min(1, 256 / Math.max(canvas.width, canvas.height));
+      thumb.width = Math.max(1, Math.round(canvas.width * scale));
+      thumb.height = Math.max(1, Math.round(canvas.height * scale));
+      thumb.getContext("2d").drawImage(canvas, 0, 0, thumb.width, thumb.height);
+      return new Promise(resolve => thumb.toBlob(resolve, "image/jpeg", .8));
+    },
     async start() {
       // Wait for an actual cropped video frame before the muxer can start with audio alone.
       const probe = document.createElement("video");
@@ -176,6 +186,64 @@ function croppedRecording(preview, frame, currentZoom) {
 function timerText(milliseconds) {
   const seconds = Math.floor(milliseconds / 1000);
   return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+}
+
+async function videoFrameStatus(blob) {
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.muted = true;
+  video.playsInline = true;
+  const url = URL.createObjectURL(blob);
+  let timeout;
+  try {
+    return await new Promise(resolve => {
+      video.onloadeddata = () => resolve(video.videoWidth && video.videoHeight ? "ready" : "missing");
+      video.onerror = () => resolve("unknown");
+      timeout = setTimeout(() => resolve("unknown"), 3500);
+      video.src = url;
+    });
+  } finally {
+    clearTimeout(timeout);
+    video.onloadeddata = video.onerror = null;
+    video.removeAttribute("src");
+    video.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function prepareVp8Encoder(stream) {
+  if (vp8EncoderReady) return;
+  // The first encoder in a fresh Chrome process can accept input before it can emit a frame.
+  // Prime with video alone so startup never adds microphone audio to the actual clip.
+  const mimeType = "video/webm;codecs=vp8";
+  if (!MediaRecorder.isTypeSupported(mimeType)) return;
+  const probe = new MediaRecorder(stream, {mimeType, videoBitsPerSecond: 2000000});
+  const chunks = [];
+  let inspecting = false;
+  let timeout;
+  const stop = () => { if (probe.state === "recording") probe.stop(); };
+  try {
+    await new Promise(resolve => {
+      probe.onstop = resolve;
+      probe.ondataavailable = async event => {
+        if (!event.data.size || probe.state !== "recording") return;
+        chunks.push(event.data);
+        if (inspecting) return;
+        inspecting = true;
+        const frames = await videoFrameStatus(new Blob(chunks, {type: mimeType}));
+        inspecting = false;
+        if (frames === "ready") {
+          vp8EncoderReady = true;
+          stop();
+        }
+      };
+      probe.start(150);
+      timeout = setTimeout(stop, 5000);
+    });
+  } finally {
+    clearTimeout(timeout);
+    probe.ondataavailable = probe.onstop = null;
+  }
 }
 
 const cameraIcons = {
@@ -228,7 +296,9 @@ export async function openCamera({onCapture, onClose, onNotice}) {
         <div class="originals-head"><h2 id="camera-originals-title">원본 보관</h2>
           <button type="button" data-dismiss aria-label="원본 보관 닫기">${cameraIcon("close")}</button>
         </div>
-        <p data-location></p><p data-status></p>
+        <p data-location></p>
+        <button type="button" class="originals-folder" data-gallery>${cameraIcon("folder")}<span>원본 폴더 연결</span></button>
+        <p data-status></p>
         <div data-recovery></div>
       </section>
       <output data-time hidden aria-live="off"></output>
@@ -240,7 +310,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
         <button type="button" data-video aria-pressed="false">영상</button>
       </div>
       <div class="capture-controls">
-        <button type="button" class="camera-tool side-tool" data-gallery aria-label="원본 폴더 연결" title="원본 폴더 연결">${cameraIcon("folder")}</button>
+        <button type="button" class="camera-tool side-tool" data-review aria-label="이번 촬영 보기" aria-haspopup="dialog" disabled></button>
         <button type="button" data-shutter aria-label="사진 촬영"><i aria-hidden="true"></i></button>
         <button type="button" class="camera-tool side-tool" data-done aria-label="촬영 완료" title="촬영 완료">${cameraIcon("done")}<span class="capture-badge" data-count hidden></span></button>
       </div>
@@ -249,6 +319,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   dialog.showModal();
   const find = name => dialog.querySelector(`[data-${name}]`);
   const preview = find("preview");
+  const review = createCaptureReview(dialog);
   const orientation = matchMedia("(orientation: landscape)");
   const ratioButtons = Array.from(dialog.querySelectorAll("[data-ratio]"));
   const zoomControl = find("zoom");
@@ -292,6 +363,8 @@ export async function openCamera({onCapture, onClose, onNotice}) {
   let recorder;
   let recordingTime;
   let recordingFrames;
+  let recordingPoster;
+  let savingFinishedVideo = false;
   let recordingFrame;
   let ratio = "1:1";
   let capabilities = {};
@@ -452,6 +525,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     find("photo").setAttribute("aria-pressed", String(mode === "photo"));
     find("video").setAttribute("aria-pressed", String(mode === "video"));
     find("gallery").disabled = closing || busy || recording;
+    review.setAvailable(!closing && !closed && !recording && (!busy || savingFinishedVideo));
     find("done").disabled = closing || (busy && !!stream);
     find("shutter").dataset.mode = recording ? "recording" : mode;
     find("shutter").setAttribute("aria-label", recording ? "녹화 정지" : mode === "photo" ? "사진 촬영" : "영상 녹화");
@@ -488,7 +562,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     toggleFor("originals").title = "원본 보관" + notice;
     if (saveError) {
       const retry = document.createElement("button");
-      retry.textContent = captures[0]?.recorded ? "원본 보관 재시도" : "기록 저장 재시도";
+      retry.textContent = captures[0]?.recorded || captures[0]?.originalOnly ? "원본 보관 재시도" : "기록 저장 재시도";
       retry.onclick = () => run(async () => {
         saveError = "";
         await drainCaptures();
@@ -562,10 +636,12 @@ export async function openCamera({onCapture, onClose, onNotice}) {
     return archive(shot.file, shot.directory).then(message => ({message}), error => ({error}));
   }
 
-  function enqueueCapture(blob, takenAt) {
-    const shot = {directory: folder, recorded: false};
-    shot.ready = Promise.resolve(blob).then(result => {
-      shot.file = captureName(result, takenAt);
+  function enqueueCapture(blob, takenAt, poster, originalOnly = false) {
+    const shot = {directory: folder, recorded: false, originalOnly};
+    const file = Promise.resolve(blob).then(result => captureName(result, takenAt));
+    if (!originalOnly) review.add(file, poster);
+    shot.ready = file.then(result => {
+      shot.file = result;
       shot.backup = keepOriginal(shot);
     }).catch(error => { shot.error = error; });
     captures.push(shot);
@@ -597,7 +673,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
         continue;
       }
       try {
-        if (!shot.recorded) {
+        if (!shot.recorded && !shot.originalOnly) {
           await onCapture(shot.file);
           shot.recorded = true;
         }
@@ -608,10 +684,16 @@ export async function openCamera({onCapture, onClose, onNotice}) {
           throw original.error;
         }
         captures.shift();
-        saved++;
-        if (!captureError) status("기록 저장됨. " + original.message);
+        if (shot.originalOnly) {
+          failedExposures++;
+          captureError = "영상 프레임이 없습니다. " + original.message + " 다시 촬영하세요.";
+          status(captureError, true);
+        } else {
+          saved++;
+          if (!captureError) status("기록 저장됨. " + original.message);
+        }
       } catch {
-        saveError = shot.recorded ? "원본을 별도로 보관하지 못했습니다. 공간을 확인하고 재시도하세요." :
+        saveError = shot.recorded || shot.originalOnly ? "원본을 별도로 보관하지 못했습니다. 공간을 확인하고 재시도하세요." :
           "기록 저장에 실패했습니다. 공간을 확인하고 재시도하세요.";
         status(saveError, true);
         update();
@@ -657,7 +739,11 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       status("마이크를 사용할 수 없어 소리 없이 녹화합니다.");
     }
     if (closed) { microphone?.getTracks().forEach(track => track.stop()); return; }
-    const mimeType = ["video/mp4", "video/webm;codecs=vp8,opus", "video/webm"].find(type => MediaRecorder.isTypeSupported(type));
+    // Short MP4s on Chromium can flush before the first encoded video frame.
+    const mimeType = (microphone
+      ? ["video/webm;codecs=vp8,opus", "video/mp4;codecs=avc1,mp4a.40.2", "video/mp4;codecs=avc1,opus"]
+      : ["video/webm;codecs=vp8", "video/mp4;codecs=avc1"])
+      .concat("video/webm", "video/mp4").find(type => MediaRecorder.isTypeSupported(type));
     const chunks = [];
     let resolveStop;
     let rejectStop;
@@ -668,6 +754,12 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       recordingFrame = currentFrame();
       recordingFrames = croppedRecording(preview, recordingFrame, () => digitalZoom);
       await recordingFrames.start();
+      if (mimeType?.includes("vp8") && !vp8EncoderReady) {
+        status("녹화를 준비하고 있습니다.", true);
+        // Some implementations support recording only with the microphone attached.
+        await prepareVp8Encoder(recordingFrames.stream).catch(() => {});
+      }
+      recordingPoster = recordingFrames.poster().catch(() => null);
       const media = new MediaStream([...recordingFrames.stream.getVideoTracks(), ...(microphone?.getAudioTracks() || [])]);
       recorder = new MediaRecorder(media, {...(mimeType ? {mimeType} : {}), videoBitsPerSecond: 2000000});
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
@@ -676,13 +768,14 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       recorder.onstop = () => {
         releaseRecordingTracks();
         const result = new Blob(chunks, {type: recorder.mimeType || chunks[0]?.type});
-        if (recordingError || !result.size) rejectStop(recordingError || new Error("저장할 영상이 없습니다."));
+        if (recordingError || !result.size) rejectStop(recordingError || new Error("저장할 영상이 없습니다. 다시 촬영하세요."));
         else resolveStop(result);
         if (!busy && !closed) void run(finishRecording);
       };
-      recorder.start(1000);
+      recorder.start(250);
     } catch (error) {
       releaseRecordingTracks();
+      recordingPoster = null;
       recordingFrame = null;
       updateFrame();
       recorder = null;
@@ -697,17 +790,28 @@ export async function openCamera({onCapture, onClose, onNotice}) {
 
   async function finishRecording() {
     if (recorder?.state === "recording") recorder.stop();
+    const poster = recordingPoster;
     let blob;
     try {
       blob = await recordingResult;
     } finally {
       recordingResult = null;
       recorder = null;
+      recordingPoster = null;
       recordingFrame = null;
       updateFrame();
     }
-    enqueueCapture(blob, Date.now());
-    await drainCaptures();
+    savingFinishedVideo = true;
+    try {
+      const frames = await videoFrameStatus(blob);
+      enqueueCapture(blob, Date.now(), poster, frames === "missing");
+      await drainCaptures();
+      if (frames === "unknown" && !saveError) {
+        status("기기에 저장했지만 재생을 확인하지 못했습니다. 촬영 목록에서 확인하세요.", true);
+      }
+    } finally {
+      savingFinishedVideo = false;
+    }
     if (!closed && stream?.getVideoTracks()[0]?.readyState !== "live") await startPreview();
   }
 
@@ -738,6 +842,7 @@ export async function openCamera({onCapture, onClose, onNotice}) {
       update();
     }
     closed = true;
+    review.dispose();
     release();
     window.removeEventListener("pagehide", release);
     orientation.removeEventListener("change", updateFrame);
