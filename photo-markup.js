@@ -2,7 +2,7 @@ const colors = [["#ff453a", "빨강"], ["#ffd65a", "노랑"], ["#ffffff", "흰�
 const hints = {
   ellipse: "사진 위에서 손가락을 끌어 원을 그리세요.",
   arrow: "화살표를 시작할 곳에서 가리킬 곳까지 끌어주세요.",
-  text: "사진에서 글자를 넣을 곳을 누르세요.",
+  text: "빈 곳을 눌러 글자를 넣고, 넣은 글자는 끌어서 옮기세요.",
 };
 const icons = {
   cancel: '<path d="m6 6 12 12M18 6 6 18"/>',
@@ -14,7 +14,7 @@ const icons = {
 const icon = key => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[key]}</svg>`;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
-function drawText(ctx, mark, width, height) {
+function textLayout(ctx, mark, width, height) {
   const short = Math.min(width, height), margin = short * .015;
   let size = short * .052;
   function wrap() {
@@ -40,8 +40,16 @@ function drawText(ctx, mark, width, height) {
   }
   let longest = 0;
   for (const line of lines) longest = Math.max(longest, ctx.measureText(line).width);
-  const x = clamp(mark.x * width, margin, width - longest - margin);
-  const y = clamp(mark.y * height, margin, height - lines.length * size * 1.3 - margin);
+  const blockHeight = lines.length * size * 1.3;
+  const maxX = Math.max(margin, width - longest - margin);
+  const maxY = Math.max(margin, height - blockHeight - margin);
+  const x = clamp(mark.x * width, margin, maxX);
+  const y = clamp(mark.y * height, margin, maxY);
+  return {lines, size, x, y, width: longest, height: blockHeight, margin, maxX, maxY};
+}
+
+function drawText(ctx, mark, width, height) {
+  const {lines, size, x, y} = textLayout(ctx, mark, width, height);
   ctx.textBaseline = "top";
   ctx.lineWidth = size * .145;
   ctx.strokeStyle = "rgba(0,0,0,.85)";
@@ -136,7 +144,9 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
   const toolButtons = panel.querySelectorAll("[data-markup-tool]");
   const colorButtons = panel.querySelectorAll("[data-markup-color]");
   const history = marks.slice();
+  const edits = [];
   let tool = "ellipse", color = colors[0][0], activePointer = null, stroke = null, textPoint = null;
+  let drag = null;
   let dirtyText = false, ready = false, saving = false, didSave = false, frame = 0;
 
   function paint() {
@@ -148,9 +158,9 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
     if (canvas.height !== height) canvas.height = height;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, width, height);
-    for (const mark of history) drawMark(ctx, mark, width, height);
+    history.forEach((mark, index) => drawMark(ctx, drag?.index === index ? drag.preview : mark, width, height));
     if (stroke) drawMark(ctx, stroke, width, height);
-    if (textPoint && dirtyText) drawMark(ctx, {...textPoint, type:"text", color, text:input.value}, width, height);
+    if (textPoint && dirtyText) drawMark(ctx, drag?.index === history.length ? drag.preview : draftText(), width, height);
   }
   function repaint() { if (!frame) frame = requestAnimationFrame(paint); }
   function changed() {
@@ -171,9 +181,16 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
       btn.setAttribute("aria-pressed", String(btn.dataset.markupColor === color));
     }
   }
+  function draftText() {
+    return {...textPoint, type:"text", color, text:input.value.trim()};
+  }
+  function putMark(mark, index = history.length) {
+    edits.push({index, previous: history[index]});
+    history[index] = mark;
+  }
   function endText(apply) {
     if (!textPoint) return;
-    if (apply && dirtyText) history.push({...textPoint, type:"text", color, text:input.value.trim()});
+    if (apply && dirtyText) putMark(draftText());
     textPoint = null;
     dirtyText = false;
     input.value = "";
@@ -188,23 +205,75 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
     const rect = canvas.getBoundingClientRect();
     return {x:clamp((event.clientX - rect.left) / rect.width, 0, 1), y:clamp((event.clientY - rect.top) / rect.height, 0, 1)};
   }
+  function textAt(p, padding) {
+    const rect = canvas.getBoundingClientRect();
+    const {width, height} = rect;
+    const ctx = canvas.getContext("2d");
+    const x = p.x * width, y = p.y * height;
+    let nearby = null;
+    // The keyboard can stay open while repositioning the text being entered.
+    const first = textPoint ? history.length : 0;
+    const last = textPoint && dirtyText ? history.length : history.length - 1;
+    for (let index = last; index >= first; index--) {
+      const mark = index === history.length ? draftText() : history[index];
+      if (mark.type !== "text") continue;
+      const box = textLayout(ctx, mark, width, height);
+      if (x < box.x - padding || x > box.x + box.width + padding ||
+          y < box.y - padding || y > box.y + box.height + padding) continue;
+      const lineHeight = box.size * 1.3;
+      for (let i = 0; i < box.lines.length; i++) {
+        if (!box.lines[i]) continue;
+        const top = box.y + i * lineHeight;
+        const dy = Math.max(top - y, y - top - lineHeight, 0);
+        if (dy > padding) continue;
+        const end = box.x + ctx.measureText(box.lines[i]).width;
+        const dx = Math.max(box.x - x, x - end, 0);
+        if (Math.hypot(dx, dy) > padding) continue;
+        const hit = {index, mark, preview: mark, start: p, box, rect};
+        if (!dx && !dy) return hit;
+        nearby ??= hit;
+      }
+    }
+    return nearby;
+  }
+  function moveText(p) {
+    const {box, start, rect: {width, height}, mark} = drag;
+    const dx = (p.x - start.x) * width, dy = (p.y - start.y) * height;
+    const x = clamp(box.x + dx, box.margin, box.maxX);
+    const y = clamp(box.y + dy, box.margin, box.maxY);
+    // Start from the displayed corner so even a label clamped at the edge follows the finger.
+    drag.preview = Math.hypot(x - box.x, y - box.y) < 3 ? mark : {...mark, x:x / width, y:y / height};
+    repaint();
+  }
   canvas.onpointerdown = event => {
     if (!ready || saving || event.button !== 0 || activePointer !== null || !event.isPrimary) return;
     const p = point(event);
     activePointer = event.pointerId;
     canvas.setPointerCapture(activePointer);
-    if (tool !== "text") stroke = {type:tool, color, x1:p.x, y1:p.y, x2:p.x, y2:p.y};
-    hint.textContent = hints[tool];
+    drag = textAt(p, event.pointerType === "touch" ? 8 : 3);
+    if (drag) {
+      event.preventDefault();
+      canvas.style.cursor = "grabbing";
+      hint.textContent = "원하는 위치로 끌어 놓으세요.";
+    } else {
+      if (tool !== "text") stroke = {type:tool, color, x1:p.x, y1:p.y, x2:p.x, y2:p.y};
+      hint.textContent = hints[tool];
+    }
   };
   canvas.onpointermove = event => {
-    if (event.pointerId !== activePointer || !stroke) return;
+    if (event.pointerId !== activePointer) return;
     const p = point(event);
+    if (drag) { moveText(p); return; }
+    if (!stroke) return;
     stroke.x2 = p.x; stroke.y2 = p.y;
     repaint();
   };
   function cancelStroke() {
     activePointer = null;
     stroke = null;
+    drag = null;
+    canvas.style.cursor = "";
+    hint.textContent = textPoint ? "글자를 입력하고 넣기를 누르세요." : hints[tool];
     repaint();
   }
   canvas.onpointercancel = canvas.onlostpointercapture = event => {
@@ -214,11 +283,18 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
     if (event.pointerId !== activePointer) return;
     const p = point(event);
     activePointer = null;
-    if (stroke) {
+    if (drag) {
+      moveText(p);
+      if (drag.preview !== drag.mark) {
+        if (drag.index === history.length) textPoint = {x: drag.preview.x, y: drag.preview.y};
+        else putMark(drag.preview, drag.index);
+      }
+      cancelStroke();
+    } else if (stroke) {
       stroke.x2 = p.x; stroke.y2 = p.y;
       const rect = canvas.getBoundingClientRect();
       const dx = Math.abs(stroke.x2 - stroke.x1) * rect.width, dy = Math.abs(stroke.y2 - stroke.y1) * rect.height;
-      if (stroke.type === "ellipse" ? Math.min(dx, dy) >= 3 : Math.hypot(dx, dy) >= 5) history.push(stroke);
+      if (stroke.type === "ellipse" ? Math.min(dx, dy) >= 3 : Math.hypot(dx, dy) >= 5) putMark(stroke);
       stroke = null;
     } else if (tool === "text") {
       textPoint = p;
@@ -238,14 +314,19 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
   };
   for (const btn of colorButtons) btn.onclick = () => { color = btn.dataset.markupColor; repaint(); buttons(); };
   undo.onclick = () => {
+    cancelStroke();
     if (textPoint) endText(false);
-    else history.pop();
+    else {
+      const edit = edits.pop();
+      if (edit?.previous) history[edit.index] = edit.previous;
+      else history.pop();
+    }
     hint.textContent = hints[tool]; repaint(); buttons();
   };
   function back() {
     if (saving) return;
-    if (textPoint) endText(false);
-    else if (stroke) cancelStroke();
+    if (drag || stroke) cancelStroke();
+    else if (textPoint) endText(false);
     else panel.close();
   }
   cancel.onclick = () => { if (!saving) panel.close(); };
@@ -259,6 +340,7 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
   };
   save.onclick = async () => {
     if (saving || !ready) return;
+    cancelStroke();
     endText(true);
     if (!changed()) { panel.close(); return; }
     saving = true;
@@ -276,13 +358,20 @@ export function openPhotoMarkup({source, marks = [], onSave, parent = document.b
       buttons();
     }
   };
+  function layoutChanged() {
+    if (drag) {
+      const rect = canvas.getBoundingClientRect();
+      if (["left", "top", "width", "height"].some(key => Math.abs(rect[key] - drag.rect[key]) > 1)) cancelStroke();
+    }
+    repaint();
+  }
   const viewport = window.visualViewport;
   function fitViewport() {
     panel.style.setProperty("--markup-height", (viewport?.height ?? window.innerHeight) + "px");
     panel.style.setProperty("--markup-top", (viewport?.offsetTop ?? 0) + "px");
-    repaint();
+    layoutChanged();
   }
-  const resize = new ResizeObserver(repaint);
+  const resize = new ResizeObserver(layoutChanged);
   resize.observe(picture);
   viewport?.addEventListener("resize", fitViewport);
   viewport?.addEventListener("scroll", fitViewport);
